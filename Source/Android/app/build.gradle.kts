@@ -141,8 +141,9 @@ dependencies {
     implementation(libs.androidx.tvprovider)
     implementation(libs.androidx.swiperefreshlayout)
 
-    // For loading game covers from disk and GameTDB
+    // For loading game covers from disk and GameTDB; svg decoder for CheevoMap assets
     implementation(libs.coil)
+    implementation(libs.coil.svg)
 
     // For loading custom GPU drivers
     implementation(libs.kotlinx.serialization.json)

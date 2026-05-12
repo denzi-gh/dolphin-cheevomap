@@ -13,6 +13,7 @@ import androidx.fragment.app.Fragment
 import org.dolphinemu.dolphinemu.NativeLibrary
 import org.dolphinemu.dolphinemu.activities.EmulationActivity
 import org.dolphinemu.dolphinemu.databinding.FragmentEmulationBinding
+import org.dolphinemu.dolphinemu.features.cheevomap.CheevoMapController
 import org.dolphinemu.dolphinemu.features.settings.model.BooleanSetting
 import org.dolphinemu.dolphinemu.features.settings.model.Settings
 import org.dolphinemu.dolphinemu.overlay.InputOverlay
@@ -22,6 +23,7 @@ import java.io.File
 
 class EmulationFragment : Fragment(), SurfaceHolder.Callback {
     private var inputOverlay: InputOverlay? = null
+    private var cheevoController: CheevoMapController? = null
 
     private var gamePaths: Array<String>? = null
     private var riivolution = false
@@ -100,6 +102,12 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
             inputOverlay?.refreshControls()
         }
 
+        if (cheevoController == null) {
+            cheevoController = CheevoMapController(requireContext()).also {
+                it.attach(binding.layoutEmulation)
+            }
+        }
+
         AfterDirectoryInitializationRunner().runWithLifecycle(this) {
             run(emulationActivity!!.isActivityRecreated)
         }
@@ -110,11 +118,15 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
             Log.debug("[EmulationFragment] Pausing emulation.")
             NativeLibrary.PauseEmulation(true)
         }
+        cheevoController?.detach()
+        cheevoController = null
         super.onPause()
     }
 
     override fun onDestroy() {
         inputOverlay?.onDestroy()
+        cheevoController?.detach()
+        cheevoController = null
         super.onDestroy()
     }
 

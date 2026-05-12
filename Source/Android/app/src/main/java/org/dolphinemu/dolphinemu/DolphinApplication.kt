@@ -6,12 +6,15 @@ import android.app.Activity
 import android.app.Application
 import android.content.Context
 import android.hardware.usb.UsbManager
+import coil.ImageLoader
+import coil.ImageLoaderFactory
+import coil.decode.SvgDecoder
 import org.dolphinemu.dolphinemu.utils.ActivityTracker
 import org.dolphinemu.dolphinemu.utils.DirectoryInitialization
 import org.dolphinemu.dolphinemu.utils.GCAdapter
 import org.dolphinemu.dolphinemu.utils.WiimoteAdapter
 
-class DolphinApplication : Application() {
+class DolphinApplication : Application(), ImageLoaderFactory {
     private val activityTracker = ActivityTracker()
 
     override fun onCreate() {
@@ -28,6 +31,11 @@ class DolphinApplication : Application() {
             DirectoryInitialization.start(applicationContext)
         }
     }
+
+    override fun newImageLoader(): ImageLoader =
+        ImageLoader.Builder(this)
+            .components { add(SvgDecoder.Factory()) }
+            .build()
 
     companion object {
         @JvmStatic
