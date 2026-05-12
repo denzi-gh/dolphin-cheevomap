@@ -41,6 +41,7 @@
 #include "Core/Boot/Boot.h"
 #include "Core/BootManager.h"
 #include "Core/CPUThreadConfigCallback.h"
+#include "Core/CheevoMap/CheevoMapManager.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/ConfigManager.h"
 #include "Core/CoreTiming.h"
@@ -277,6 +278,7 @@ void Stop(Core::System& system)  // - Hammertime!
   NotifyStateChanged(State::Stopping);
 
   AchievementManager::GetInstance().CloseGame();
+  CheevoMap::Manager::GetInstance().CloseGame();
 
   // Dump left over jobs
   HostDispatchJobs(system);
@@ -890,6 +892,7 @@ void Callback_NewField(Core::System& system)
   }
 
   AchievementManager::GetInstance().DoFrame();
+  CheevoMap::Manager::GetInstance().DoFrame();
 }
 
 void UpdateTitle(Core::System& system)

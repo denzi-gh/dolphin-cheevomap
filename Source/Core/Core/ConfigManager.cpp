@@ -28,6 +28,7 @@
 
 #include "Core/AchievementManager.h"
 #include "Core/Boot/Boot.h"
+#include "Core/CheevoMap/CheevoMapManager.h"
 #include "Core/Config/DefaultLocale.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Config/SYSCONFSettings.h"
@@ -269,6 +270,8 @@ void SConfig::OnESTitleChanged()
   }
 
   ReloadTextures(system);
+
+  CheevoMap::Manager::GetInstance().OnESTitleChanged();
 }
 
 void SConfig::OnTitleDirectlyBooted(const Core::CPUThreadGuard& guard)
@@ -291,6 +294,8 @@ void SConfig::OnTitleDirectlyBooted(const Core::CPUThreadGuard& guard)
   {
     ReloadTextures(system);
   }
+
+  CheevoMap::Manager::GetInstance().OnTitleBooted(guard);
 }
 
 void SConfig::ReloadTextures(Core::System& system)

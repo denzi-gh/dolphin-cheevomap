@@ -23,6 +23,11 @@ add_library(core
   CheatGeneration.h
   CheatSearch.cpp
   CheatSearch.h
+  CheevoMap/CheevoMapEntry.h
+  CheevoMap/CheevoMapFile.cpp
+  CheevoMap/CheevoMapFile.h
+  CheevoMap/CheevoMapManager.cpp
+  CheevoMap/CheevoMapManager.h
   CommonTitles.h
   Config/AchievementSettings.cpp
   Config/AchievementSettings.h

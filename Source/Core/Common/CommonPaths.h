@@ -50,6 +50,7 @@
 #define TRI_USER_DIR "Triforce"
 #define CONFIG_DIR "Config"
 #define GAMESETTINGS_DIR "GameSettings"
+#define CHEEVOMAP_DIR "CheevoMap"
 #define MAPS_DIR "Maps"
 #define CACHE_DIR "Cache"
 #define COVERCACHE_DIR "GameCovers"
