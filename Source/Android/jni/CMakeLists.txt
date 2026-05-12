@@ -7,6 +7,7 @@ add_library(main SHARED
   Cheats/GraphicsMod.cpp
   Cheats/GraphicsModGroup.cpp
   Cheats/PatchCheat.cpp
+  CheevoMapAdapter.cpp
   Config/ConfigChangedCallback.cpp
   Config/NativeConfig.cpp
   Config/PostProcessing.cpp

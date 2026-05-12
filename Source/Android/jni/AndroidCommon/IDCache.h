@@ -124,4 +124,9 @@ jclass GetAudioUtilsClass();
 jmethodID GetAudioUtilsGetSampleRate();
 jmethodID GetAudioUtilsGetFramesPerBuffer();
 
+jclass GetCheevoMapEntryClass();
+jmethodID GetCheevoMapEntryConstructor();
+jclass GetCheevoMapListenerClass();
+jmethodID GetCheevoMapListenerOnChanged();
+
 }  // namespace IDCache

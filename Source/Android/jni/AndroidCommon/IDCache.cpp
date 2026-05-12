@@ -125,6 +125,11 @@ static jclass s_audio_utils_class;
 static jmethodID s_audio_utils_get_sample_rate;
 static jmethodID s_audio_utils_get_frames_per_buffer;
 
+static jclass s_cheevomap_entry_class;
+static jmethodID s_cheevomap_entry_constructor;
+static jclass s_cheevomap_listener_class;
+static jmethodID s_cheevomap_listener_on_changed;
+
 namespace IDCache
 {
 JNIEnv* GetEnvForThread()
@@ -575,6 +580,26 @@ jmethodID GetAudioUtilsGetFramesPerBuffer()
   return s_audio_utils_get_frames_per_buffer;
 }
 
+jclass GetCheevoMapEntryClass()
+{
+  return s_cheevomap_entry_class;
+}
+
+jmethodID GetCheevoMapEntryConstructor()
+{
+  return s_cheevomap_entry_constructor;
+}
+
+jclass GetCheevoMapListenerClass()
+{
+  return s_cheevomap_listener_class;
+}
+
+jmethodID GetCheevoMapListenerOnChanged()
+{
+  return s_cheevomap_listener_on_changed;
+}
+
 }  // namespace IDCache
 
 extern "C" {
@@ -816,6 +841,24 @@ JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved)
       env->GetStaticMethodID(audio_utils_class, "getFramesPerBuffer", "()I");
   env->DeleteLocalRef(audio_utils_class);
 
+  const jclass cheevomap_entry_class =
+      env->FindClass("org/dolphinemu/dolphinemu/features/cheevomap/CheevoMapModel$Entry");
+  s_cheevomap_entry_class =
+      reinterpret_cast<jclass>(env->NewGlobalRef(cheevomap_entry_class));
+  s_cheevomap_entry_constructor = env->GetMethodID(
+      cheevomap_entry_class, "<init>",
+      "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZLjava/lang/"
+      "String;[Ljava/lang/String;)V");
+  env->DeleteLocalRef(cheevomap_entry_class);
+
+  const jclass cheevomap_listener_class =
+      env->FindClass("org/dolphinemu/dolphinemu/features/cheevomap/CheevoMapModel$Listener");
+  s_cheevomap_listener_class =
+      reinterpret_cast<jclass>(env->NewGlobalRef(cheevomap_listener_class));
+  s_cheevomap_listener_on_changed =
+      env->GetMethodID(cheevomap_listener_class, "onChanged", "()V");
+  env->DeleteLocalRef(cheevomap_listener_class);
+
   return JNI_VERSION;
 }
 
@@ -853,5 +896,7 @@ JNIEXPORT void JNI_OnUnload(JavaVM* vm, void* reserved)
   env->DeleteGlobalRef(s_input_detector_class);
   env->DeleteGlobalRef(s_permission_handler_class);
   env->DeleteGlobalRef(s_audio_utils_class);
+  env->DeleteGlobalRef(s_cheevomap_entry_class);
+  env->DeleteGlobalRef(s_cheevomap_listener_class);
 }
 }

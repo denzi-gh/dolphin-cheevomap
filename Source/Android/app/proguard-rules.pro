@@ -17,3 +17,7 @@
 -keep class androidx.core.util.Pair {
     <init>(java.lang.Object, java.lang.Object);
 }
+
+# CheevoMap data class + listener interface are constructed/invoked from native via JNI.
+-keep class org.dolphinemu.dolphinemu.features.cheevomap.CheevoMapModel$Entry { *; }
+-keep class org.dolphinemu.dolphinemu.features.cheevomap.CheevoMapModel$Listener { *; }
