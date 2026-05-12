@@ -349,6 +349,22 @@ class SettingsFragmentPresenter(
                 R.string.time_tracking_description
             )
         )
+        sl.add(
+            SwitchSetting(
+                context,
+                BooleanSetting.MAIN_SHOW_CHEEVOMAP,
+                R.string.show_cheevomap,
+                R.string.show_cheevomap_description
+            )
+        )
+        sl.add(
+            SwitchSetting(
+                context,
+                BooleanSetting.MAIN_CHEEVOMAP_USE_SECONDARY_DISPLAY,
+                R.string.cheevomap_secondary_display,
+                R.string.cheevomap_secondary_display_description
+            )
+        )
 
         val appTheme: AbstractIntSetting = object : AbstractIntSetting {
             override val isOverridden: Boolean

@@ -282,6 +282,18 @@ enum class BooleanSetting(
         "ShowInputOverlay",
         true
     ),
+    MAIN_SHOW_CHEEVOMAP(
+        Settings.FILE_DOLPHIN,
+        Settings.SECTION_INI_ANDROID,
+        "ShowCheevoMap",
+        true
+    ),
+    MAIN_CHEEVOMAP_USE_SECONDARY_DISPLAY(
+        Settings.FILE_DOLPHIN,
+        Settings.SECTION_INI_ANDROID,
+        "CheevoMapUseSecondaryDisplay",
+        true
+    ),
     MAIN_IR_ALWAYS_RECENTER(
         Settings.FILE_DOLPHIN,
         Settings.SECTION_INI_ANDROID,
