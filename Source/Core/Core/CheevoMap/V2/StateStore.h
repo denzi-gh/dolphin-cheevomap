@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <deque>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -53,23 +54,28 @@ public:
   StateSnapshot GetSnapshot() const;
 
   StateUpdate Reset(StateValueMap values = {});
+  StateUpdate ResetDeferred(StateValueMap values);
   std::optional<StateUpdate> ApplyChanges(StateValueMap values,
                                           std::vector<std::string> removed = {});
   StateApplyResult ApplyChangesForSession(u64 expected_session_id, StateValueMap values,
                                           std::vector<std::string> removed = {});
+  StateApplyResult ApplyChangesForSessionDeferred(u64 expected_session_id, StateValueMap values,
+                                                  std::vector<std::string> removed = {});
+  void DispatchPendingUpdates();
 
   Common::EventHook RegisterUpdateCallback(std::function<void(const StateUpdate&)> callback);
 
 private:
   StateApplyResult ApplyChangesInternal(std::optional<u64> expected_session_id,
-                                        StateValueMap values,
-                                        std::vector<std::string> removed);
+                                        StateValueMap values, std::vector<std::string> removed);
   void TriggerUpdate(const StateUpdate& update);
 
   mutable std::mutex m_mutex;
   u64 m_session_id = 0;
   u64 m_sequence = 0;
   StateValueMap m_values;
+  std::deque<StateUpdate> m_pending_updates;
+  bool m_dispatching = false;
   Common::HookableEvent<StateUpdate> m_update_event;
 };
 }  // namespace CheevoMap::V2

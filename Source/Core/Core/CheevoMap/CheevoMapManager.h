@@ -23,9 +23,6 @@ class CPUThreadGuard;
 
 namespace CheevoMap
 {
-bool IsV2EvaluationCurrentForGeneration(bool has_v2_package, u64 captured_generation,
-                                        u64 current_generation);
-
 class Manager
 {
 public:
@@ -49,13 +46,14 @@ public:
   Common::EventHook RegisterUpdatedCallback(std::function<void()> cb);
 
   // Fires whenever the v2 typed state store publishes a full or delta update
-  Common::EventHook RegisterV2StateUpdatedCallback(
-      std::function<void(const V2::StateUpdate&)> cb);
+  Common::EventHook RegisterV2StateUpdatedCallback(std::function<void(const V2::StateUpdate&)> cb);
 
   Manager(const Manager&) = delete;
   Manager& operator=(const Manager&) = delete;
 
 private:
+  friend class CheevoMapManagerTestAccessor;
+
   Manager() = default;
   ~Manager() = default;
 
@@ -63,6 +61,8 @@ private:
   void Evaluate(const Core::CPUThreadGuard* guard);
   void EvaluateV1(const Core::CPUThreadGuard& guard);
   void EvaluateV2(const Core::CPUThreadGuard& guard);
+  V2::StateApplyResult CommitV2Evaluation(u64 captured_generation, u64 captured_session_id,
+                                          V2::StateValueMap values);
 
   mutable std::mutex m_lock;
   std::optional<File> m_file;

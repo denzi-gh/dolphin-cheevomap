@@ -13,8 +13,8 @@
 #include "Common/FileUtil.h"
 #include "Common/Logging/Log.h"
 #include "Core/CheevoMap/CheevoMapEvaluator.h"
-#include "Core/CheevoMap/Dolphin/DolphinEmulatorDataSource.h"
 #include "Core/CheevoMap/CheevoMapFile.h"
+#include "Core/CheevoMap/Dolphin/DolphinEmulatorDataSource.h"
 #include "Core/CheevoMap/V2/Runtime.h"
 #include "Core/ConfigManager.h"
 #include "Core/Core.h"
@@ -33,8 +33,7 @@ namespace
 class RetroAchievementStateSource final : public AchievementStateSource
 {
 public:
-  std::optional<bool> IsAchievementUnlocked(u32 achievement_id,
-                                            AchievementMode mode) const override
+  std::optional<bool> IsAchievementUnlocked(u32 achievement_id, AchievementMode mode) const override
   {
     auto* client = AchievementManager::GetInstance().GetClient();
     if (!client)
@@ -67,12 +66,6 @@ std::string ResolveJsonPath(const std::string& game_id)
   return {};
 }
 }  // namespace
-
-bool IsV2EvaluationCurrentForGeneration(bool has_v2_package, u64 captured_generation,
-                                        u64 current_generation)
-{
-  return has_v2_package && captured_generation == current_generation;
-}
 
 Manager& Manager::GetInstance()
 {
@@ -153,8 +146,8 @@ void Manager::LoadForGameId(const std::string& game_id)
   {
     if (v1->game_id != game_id)
     {
-      WARN_LOG_FMT(CORE, "CheevoMap: file '{}' game_id '{}' does not match running game '{}'",
-                   path, v1->game_id, game_id);
+      WARN_LOG_FMT(CORE, "CheevoMap: file '{}' game_id '{}' does not match running game '{}'", path,
+                   v1->game_id, game_id);
       m_v2_state.Reset({});
       m_updated_event.Trigger();
       return;
@@ -180,8 +173,8 @@ void Manager::LoadForGameId(const std::string& game_id)
       m_file = std::move(*v1);
     }
     m_v2_state.Reset(std::move(initial_state));
-    INFO_LOG_FMT(CORE, "CheevoMap: loaded '{}' ({} schema v1 entries) from {}", title,
-                 entry_count, path);
+    INFO_LOG_FMT(CORE, "CheevoMap: loaded '{}' ({} schema v1 entries) from {}", title, entry_count,
+                 path);
     m_updated_event.Trigger();
     return;
   }
@@ -192,8 +185,8 @@ void Manager::LoadForGameId(const std::string& game_id)
 
   if (v2->game.id != game_id)
   {
-    WARN_LOG_FMT(CORE, "CheevoMap: file '{}' game id '{}' does not match running game '{}'",
-                 path, v2->game.id, game_id);
+    WARN_LOG_FMT(CORE, "CheevoMap: file '{}' game id '{}' does not match running game '{}'", path,
+                 v2->game.id, game_id);
     m_v2_state.Reset({});
     m_updated_event.Trigger();
     return;
@@ -336,8 +329,7 @@ void Manager::EvaluateV1(const Core::CPUThreadGuard& guard)
   }
 
   const V2::StateApplyResult v2_result =
-      m_v2_state.ApplyChangesForSession(v2_session_id, std::move(v2_values),
-                                        std::move(v2_removed));
+      m_v2_state.ApplyChangesForSession(v2_session_id, std::move(v2_values), std::move(v2_removed));
   if (v2_result.status == V2::StateApplyStatus::StaleSession)
     return;
 
@@ -369,16 +361,28 @@ void Manager::EvaluateV2(const Core::CPUThreadGuard& guard)
     return;
   }
 
-  {
-    std::lock_guard lg(m_lock);
-    if (!IsV2EvaluationCurrentForGeneration(m_v2_package.has_value(), generation, m_generation))
-      return;
-  }
-
   const V2::StateApplyResult v2_result =
-      m_v2_state.ApplyChangesForSession(v2_session_id, result->values);
+      CommitV2Evaluation(generation, v2_session_id, std::move(result->values));
   if (v2_result.status == V2::StateApplyStatus::StaleSession)
     return;
+}
+
+V2::StateApplyResult Manager::CommitV2Evaluation(u64 captured_generation, u64 captured_session_id,
+                                                 V2::StateValueMap values)
+{
+  V2::StateApplyResult result;
+
+  {
+    std::lock_guard lg(m_lock);
+
+    if (!m_v2_package || m_generation != captured_generation)
+      return {V2::StateApplyStatus::StaleSession, std::nullopt};
+
+    result = m_v2_state.ApplyChangesForSessionDeferred(captured_session_id, std::move(values));
+  }
+
+  m_v2_state.DispatchPendingUpdates();
+  return result;
 }
 
 bool Manager::IsLoaded() const
@@ -413,8 +417,8 @@ Common::EventHook Manager::RegisterUpdatedCallback(std::function<void()> cb)
   return m_updated_event.Register(std::move(cb));
 }
 
-Common::EventHook Manager::RegisterV2StateUpdatedCallback(
-    std::function<void(const V2::StateUpdate&)> cb)
+Common::EventHook
+Manager::RegisterV2StateUpdatedCallback(std::function<void(const V2::StateUpdate&)> cb)
 {
   return m_v2_state.RegisterUpdateCallback(std::move(cb));
 }

@@ -8,6 +8,7 @@
 #include <initializer_list>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -27,7 +28,7 @@
 
 namespace
 {
-using CheevoMap::IsV2EvaluationCurrentForGeneration;
+using CheevoMap::Manager;
 using CheevoMap::V2::BuildReadPlan;
 using CheevoMap::V2::DecodeReadResults;
 using CheevoMap::V2::EmulatorDataSource;
@@ -187,6 +188,52 @@ Package ValidPackage()
 
   return package;
 }
+
+}  // namespace
+
+namespace CheevoMap
+{
+class CheevoMapManagerTestAccessor
+{
+public:
+  static void SetV2PackageAndGeneration(Manager& manager, V2::Package package, u64 generation)
+  {
+    std::lock_guard lg(manager.m_lock);
+    manager.m_file.reset();
+    manager.m_v2_package = std::move(package);
+    manager.m_live.clear();
+    manager.m_loaded_game_id.clear();
+    manager.m_generation = generation;
+    manager.m_last_poll = {};
+  }
+
+  static void ClearV2PackageAndGeneration(Manager& manager, u64 generation)
+  {
+    std::lock_guard lg(manager.m_lock);
+    manager.m_file.reset();
+    manager.m_v2_package.reset();
+    manager.m_live.clear();
+    manager.m_loaded_game_id.clear();
+    manager.m_generation = generation;
+    manager.m_last_poll = {};
+  }
+
+  static V2::StateUpdate ResetV2State(Manager& manager, V2::StateValueMap values)
+  {
+    return manager.m_v2_state.Reset(std::move(values));
+  }
+
+  static V2::StateApplyResult CommitV2Evaluation(Manager& manager, u64 captured_generation,
+                                                 u64 captured_session_id, V2::StateValueMap values)
+  {
+    return manager.CommitV2Evaluation(captured_generation, captured_session_id, std::move(values));
+  }
+};
+}  // namespace CheevoMap
+
+namespace
+{
+using CheevoMap::CheevoMapManagerTestAccessor;
 
 picojson::value MinimalRootWithValue(picojson::value value)
 {
@@ -674,82 +721,76 @@ TEST(CheevoMapV2RuntimeState, EvaluationFailureIsDistinctFromNoChanges)
   EXPECT_EQ(data_source.single_read_count, 0);
 }
 
-TEST(CheevoMapV2ManagerLifecycle, StaleGenerationAfterReadDoesNotPublish)
+TEST(CheevoMapV2ManagerLifecycle, StaleGenerationCommitDoesNotMutateOrPublish)
 {
-  Package package = ValidPackage();
-  FakeDataSource data_source;
-  data_source.Write(0x10, {0x00, 0x07});
+  Manager& manager = Manager::GetInstance();
+  CheevoMapManagerTestAccessor::ClearV2PackageAndGeneration(manager, 0);
 
-  StateStore store;
+  const StateUpdate reset =
+      CheevoMapManagerTestAccessor::ResetV2State(manager, {{"coins", StateValue::Unavailable()}});
+  const auto before = manager.GetV2StateSnapshot();
+
   std::vector<StateUpdate> updates;
-  auto hook = store.RegisterUpdateCallback(
+  auto hook = manager.RegisterV2StateUpdatedCallback(
       [&updates](const StateUpdate& update) { updates.push_back(update); });
   (void)hook;
 
-  const StateUpdate reset = store.Reset({{"coins", StateValue::Unavailable()}});
-  updates.clear();
-
   const u64 captured_session_id = reset.session_id;
   const u64 captured_generation = 4;
-  u64 current_generation = captured_generation;
-  bool has_v2_package = true;
-  bool advanced_during_read = false;
+  CheevoMapManagerTestAccessor::SetV2PackageAndGeneration(manager, ValidPackage(),
+                                                          captured_generation + 1);
 
-  data_source.on_grouped_read = [&] {
-    ++current_generation;
-    advanced_during_read = true;
-  };
+  const auto result = CheevoMapManagerTestAccessor::CommitV2Evaluation(
+      manager, captured_generation, captured_session_id,
+      {{"coins", StateValue::UnsignedInteger(7)}});
 
-  std::string error;
-  const auto result = EvaluatePackage(package, data_source, &error);
-  ASSERT_TRUE(result) << error;
-  ASSERT_TRUE(advanced_during_read);
-
-  if (IsV2EvaluationCurrentForGeneration(has_v2_package, captured_generation, current_generation))
-  {
-    (void)store.ApplyChangesForSession(captured_session_id, result->values);
-  }
-
-  const auto snapshot = store.GetSnapshot();
+  EXPECT_EQ(result.status, StateApplyStatus::StaleSession);
+  EXPECT_FALSE(result.update);
+  const auto snapshot = manager.GetV2StateSnapshot();
   EXPECT_EQ(snapshot.session_id, captured_session_id);
+  EXPECT_EQ(snapshot.sequence, before.sequence);
   EXPECT_FALSE(snapshot.values.at("coins").IsAvailable());
   EXPECT_TRUE(updates.empty());
+
+  hook.reset();
+  CheevoMapManagerTestAccessor::ClearV2PackageAndGeneration(manager, 0);
+  CheevoMapManagerTestAccessor::ResetV2State(manager, {});
 }
 
-TEST(CheevoMapV2ManagerLifecycle, CurrentGenerationAfterReadPublishes)
+TEST(CheevoMapV2ManagerLifecycle, CurrentGenerationCommitMutatesAndPublishes)
 {
-  Package package = ValidPackage();
-  FakeDataSource data_source;
-  data_source.Write(0x10, {0x00, 0x08});
+  Manager& manager = Manager::GetInstance();
+  CheevoMapManagerTestAccessor::ClearV2PackageAndGeneration(manager, 0);
 
-  StateStore store;
+  const StateUpdate reset =
+      CheevoMapManagerTestAccessor::ResetV2State(manager, {{"coins", StateValue::Unavailable()}});
+  const auto before = manager.GetV2StateSnapshot();
+
   std::vector<StateUpdate> updates;
-  auto hook = store.RegisterUpdateCallback(
+  auto hook = manager.RegisterV2StateUpdatedCallback(
       [&updates](const StateUpdate& update) { updates.push_back(update); });
   (void)hook;
 
-  const StateUpdate reset = store.Reset({{"coins", StateValue::Unavailable()}});
-  updates.clear();
-
   const u64 captured_session_id = reset.session_id;
   const u64 captured_generation = 4;
-  const u64 current_generation = captured_generation;
-  const bool has_v2_package = true;
+  CheevoMapManagerTestAccessor::SetV2PackageAndGeneration(manager, ValidPackage(),
+                                                          captured_generation);
 
-  std::string error;
-  const auto result = EvaluatePackage(package, data_source, &error);
-  ASSERT_TRUE(result) << error;
-
-  ASSERT_TRUE(
-      IsV2EvaluationCurrentForGeneration(has_v2_package, captured_generation, current_generation));
-  const auto applied = store.ApplyChangesForSession(captured_session_id, result->values);
+  const auto applied = CheevoMapManagerTestAccessor::CommitV2Evaluation(
+      manager, captured_generation, captured_session_id,
+      {{"coins", StateValue::UnsignedInteger(8)}});
   EXPECT_EQ(applied.status, StateApplyStatus::Applied);
 
-  const auto snapshot = store.GetSnapshot();
+  const auto snapshot = manager.GetV2StateSnapshot();
   EXPECT_EQ(snapshot.session_id, captured_session_id);
+  EXPECT_EQ(snapshot.sequence, before.sequence + 1);
   EXPECT_EQ(*snapshot.values.at("coins").AsUnsignedInteger(), 8u);
   ASSERT_EQ(updates.size(), 1u);
   EXPECT_EQ(*updates.back().values.at("coins").AsUnsignedInteger(), 8u);
+
+  hook.reset();
+  CheevoMapManagerTestAccessor::ClearV2PackageAndGeneration(manager, 0);
+  CheevoMapManagerTestAccessor::ResetV2State(manager, {});
 }
 
 TEST(CheevoMapSchemaDispatch, DelegatesSchemaV1ToExistingParser)

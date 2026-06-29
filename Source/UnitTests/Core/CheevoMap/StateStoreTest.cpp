@@ -10,8 +10,8 @@
 
 namespace
 {
-using CheevoMap::V2::StateStore;
 using CheevoMap::V2::StateApplyStatus;
+using CheevoMap::V2::StateStore;
 using CheevoMap::V2::StateUpdate;
 using CheevoMap::V2::StateValue;
 
@@ -19,9 +19,8 @@ TEST(CheevoMapStateStore, ResetPublishesFullSnapshot)
 {
   StateStore store;
   std::vector<StateUpdate> updates;
-  auto hook = store.RegisterUpdateCallback([&updates](const StateUpdate& update) {
-    updates.push_back(update);
-  });
+  auto hook = store.RegisterUpdateCallback(
+      [&updates](const StateUpdate& update) { updates.push_back(update); });
   (void)hook;
 
   const StateUpdate update = store.Reset({{"coins", StateValue::UnsignedInteger(3)}});
@@ -43,13 +42,11 @@ TEST(CheevoMapStateStore, ResetPublishesFullSnapshot)
 TEST(CheevoMapStateStore, ApplyChangesPublishesOnlyChangedValues)
 {
   StateStore store;
-  store.Reset({{"coins", StateValue::UnsignedInteger(3)},
-               {"name", StateValue::String("Samus")}});
+  store.Reset({{"coins", StateValue::UnsignedInteger(3)}, {"name", StateValue::String("Samus")}});
 
   std::vector<StateUpdate> updates;
-  auto hook = store.RegisterUpdateCallback([&updates](const StateUpdate& update) {
-    updates.push_back(update);
-  });
+  auto hook = store.RegisterUpdateCallback(
+      [&updates](const StateUpdate& update) { updates.push_back(update); });
   (void)hook;
 
   auto update = store.ApplyChanges({{"coins", StateValue::UnsignedInteger(3)},
@@ -73,9 +70,8 @@ TEST(CheevoMapStateStore, UnchangedUpdatesAreSuppressed)
   store.Reset({{"coins", StateValue::UnsignedInteger(3)}});
 
   std::vector<StateUpdate> updates;
-  auto hook = store.RegisterUpdateCallback([&updates](const StateUpdate& update) {
-    updates.push_back(update);
-  });
+  auto hook = store.RegisterUpdateCallback(
+      [&updates](const StateUpdate& update) { updates.push_back(update); });
   (void)hook;
 
   EXPECT_FALSE(store.ApplyChanges({{"coins", StateValue::UnsignedInteger(3)}}));
@@ -89,13 +85,12 @@ TEST(CheevoMapStateStore, CurrentSessionConditionalUpdatePublishesDelta)
   const StateUpdate reset = store.Reset({{"coins", StateValue::UnsignedInteger(3)}});
 
   std::vector<StateUpdate> updates;
-  auto hook = store.RegisterUpdateCallback([&updates](const StateUpdate& update) {
-    updates.push_back(update);
-  });
+  auto hook = store.RegisterUpdateCallback(
+      [&updates](const StateUpdate& update) { updates.push_back(update); });
   (void)hook;
 
-  const auto result = store.ApplyChangesForSession(
-      reset.session_id, {{"coins", StateValue::UnsignedInteger(4)}});
+  const auto result =
+      store.ApplyChangesForSession(reset.session_id, {{"coins", StateValue::UnsignedInteger(4)}});
 
   EXPECT_EQ(result.status, StateApplyStatus::Applied);
   ASSERT_TRUE(result.update);
@@ -112,19 +107,101 @@ TEST(CheevoMapStateStore, CurrentSessionConditionalUpdatePublishesDelta)
   EXPECT_EQ(*snapshot.values.at("coins").AsUnsignedInteger(), 4u);
 }
 
+TEST(CheevoMapStateStore, DeferredApplyDoesNotNotifyEarly)
+{
+  StateStore store;
+  std::vector<StateUpdate> updates;
+  auto hook = store.RegisterUpdateCallback(
+      [&updates](const StateUpdate& update) { updates.push_back(update); });
+  (void)hook;
+
+  const StateUpdate reset = store.Reset({{"coins", StateValue::UnsignedInteger(3)}});
+  updates.clear();
+
+  const auto result = store.ApplyChangesForSessionDeferred(
+      reset.session_id, {{"coins", StateValue::UnsignedInteger(4)}});
+
+  EXPECT_EQ(result.status, StateApplyStatus::Applied);
+  const auto snapshot = store.GetSnapshot();
+  EXPECT_EQ(snapshot.sequence, 2u);
+  ASSERT_TRUE(snapshot.values.at("coins").AsUnsignedInteger());
+  EXPECT_EQ(*snapshot.values.at("coins").AsUnsignedInteger(), 4u);
+  EXPECT_TRUE(updates.empty());
+
+  store.DispatchPendingUpdates();
+
+  ASSERT_EQ(updates.size(), 1u);
+  EXPECT_EQ(updates.front().session_id, reset.session_id);
+  EXPECT_EQ(updates.front().sequence, 2u);
+}
+
+TEST(CheevoMapStateStore, DeferredApplyIsDispatchedBeforeLifecycleReset)
+{
+  StateStore store;
+  std::vector<StateUpdate> updates;
+  auto hook = store.RegisterUpdateCallback(
+      [&updates](const StateUpdate& update) { updates.push_back(update); });
+  (void)hook;
+
+  const StateUpdate session_a = store.Reset({{"coins", StateValue::Unavailable()}});
+  updates.clear();
+
+  const auto delta = store.ApplyChangesForSessionDeferred(
+      session_a.session_id, {{"coins", StateValue::UnsignedInteger(7)}});
+  ASSERT_EQ(delta.status, StateApplyStatus::Applied);
+
+  const StateUpdate session_b = store.Reset({{"coins", StateValue::Unavailable()}});
+
+  ASSERT_EQ(updates.size(), 2u);
+  EXPECT_FALSE(updates[0].full);
+  EXPECT_EQ(updates[0].session_id, session_a.session_id);
+  ASSERT_TRUE(updates[0].values.at("coins").AsUnsignedInteger());
+  EXPECT_EQ(*updates[0].values.at("coins").AsUnsignedInteger(), 7u);
+  EXPECT_TRUE(updates[1].full);
+  EXPECT_EQ(updates[1].session_id, session_b.session_id);
+
+  store.DispatchPendingUpdates();
+  ASSERT_EQ(updates.size(), 2u);
+}
+
+TEST(CheevoMapStateStore, ReentrantDispatchDeliversQueuedUpdateOnceAfterCurrentUpdate)
+{
+  StateStore store;
+  store.Reset(
+      {{"first", StateValue::UnsignedInteger(0)}, {"second", StateValue::UnsignedInteger(0)}});
+
+  std::vector<StateUpdate> updates;
+  auto hook = store.RegisterUpdateCallback([&store, &updates](const StateUpdate& update) {
+    updates.push_back(update);
+    if (updates.size() == 1)
+      store.ApplyChanges({{"second", StateValue::UnsignedInteger(2)}});
+  });
+  (void)hook;
+
+  const auto first = store.ApplyChanges({{"first", StateValue::UnsignedInteger(1)}});
+
+  ASSERT_TRUE(first);
+  ASSERT_EQ(updates.size(), 2u);
+  ASSERT_TRUE(updates[0].values.contains("first"));
+  EXPECT_FALSE(updates[0].values.contains("second"));
+  ASSERT_TRUE(updates[1].values.contains("second"));
+  EXPECT_FALSE(updates[1].values.contains("first"));
+  EXPECT_EQ(updates[0].sequence, 2u);
+  EXPECT_EQ(updates[1].sequence, 3u);
+}
+
 TEST(CheevoMapStateStore, ConditionalUpdateDistinguishesNoChangeFromStaleSession)
 {
   StateStore store;
   const StateUpdate first = store.Reset({{"coins", StateValue::UnsignedInteger(3)}});
 
   std::vector<StateUpdate> updates;
-  auto hook = store.RegisterUpdateCallback([&updates](const StateUpdate& update) {
-    updates.push_back(update);
-  });
+  auto hook = store.RegisterUpdateCallback(
+      [&updates](const StateUpdate& update) { updates.push_back(update); });
   (void)hook;
 
-  const auto no_change = store.ApplyChangesForSession(
-      first.session_id, {{"coins", StateValue::UnsignedInteger(3)}});
+  const auto no_change =
+      store.ApplyChangesForSession(first.session_id, {{"coins", StateValue::UnsignedInteger(3)}});
   EXPECT_EQ(no_change.status, StateApplyStatus::NoChanges);
   EXPECT_FALSE(no_change.update);
   EXPECT_TRUE(updates.empty());
@@ -132,8 +209,8 @@ TEST(CheevoMapStateStore, ConditionalUpdateDistinguishesNoChangeFromStaleSession
   const StateUpdate second = store.Reset({{"coins", StateValue::UnsignedInteger(0)}});
   ASSERT_EQ(updates.size(), 1u);
 
-  const auto stale = store.ApplyChangesForSession(
-      first.session_id, {{"coins", StateValue::UnsignedInteger(9)}});
+  const auto stale =
+      store.ApplyChangesForSession(first.session_id, {{"coins", StateValue::UnsignedInteger(9)}});
   EXPECT_EQ(stale.status, StateApplyStatus::StaleSession);
   EXPECT_FALSE(stale.update);
   ASSERT_EQ(updates.size(), 1u);
@@ -151,16 +228,15 @@ TEST(CheevoMapStateStore, StaleUpdateAfterResetCannotRepopulateNewSession)
   const StateUpdate old_session = store.Reset({{"coins", StateValue::UnsignedInteger(3)}});
 
   std::vector<StateUpdate> updates;
-  auto hook = store.RegisterUpdateCallback([&updates](const StateUpdate& update) {
-    updates.push_back(update);
-  });
+  auto hook = store.RegisterUpdateCallback(
+      [&updates](const StateUpdate& update) { updates.push_back(update); });
   (void)hook;
 
   const StateUpdate new_session = store.Reset({});
   ASSERT_EQ(updates.size(), 1u);
 
-  const auto stale = store.ApplyChangesForSession(
-      old_session.session_id, {{"coins", StateValue::UnsignedInteger(99)}});
+  const auto stale = store.ApplyChangesForSession(old_session.session_id,
+                                                  {{"coins", StateValue::UnsignedInteger(99)}});
 
   EXPECT_EQ(stale.status, StateApplyStatus::StaleSession);
   EXPECT_FALSE(stale.update);
@@ -196,8 +272,8 @@ TEST(CheevoMapStateStore, LifecycleCloseAndReloadRejectOlderEvaluationResults)
 TEST(CheevoMapStateStore, RemovedValuesAreReported)
 {
   StateStore store;
-  store.Reset({{"coins", StateValue::UnsignedInteger(3)},
-               {"health", StateValue::SignedInteger(2)}});
+  store.Reset(
+      {{"coins", StateValue::UnsignedInteger(3)}, {"health", StateValue::SignedInteger(2)}});
 
   const auto update = store.ApplyChanges({}, {"missing", "coins"});
 
@@ -228,10 +304,9 @@ TEST(CheevoMapStateStore, MultipleListenersReceiveUpdates)
   StateStore store;
   int first_count = 0;
   int second_count = 0;
-  auto first = store.RegisterUpdateCallback(
-      [&first_count](const StateUpdate&) { ++first_count; });
-  auto second = store.RegisterUpdateCallback(
-      [&second_count](const StateUpdate&) { ++second_count; });
+  auto first = store.RegisterUpdateCallback([&first_count](const StateUpdate&) { ++first_count; });
+  auto second =
+      store.RegisterUpdateCallback([&second_count](const StateUpdate&) { ++second_count; });
   (void)first;
   (void)second;
 
