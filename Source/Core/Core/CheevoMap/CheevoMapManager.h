@@ -13,6 +13,7 @@
 #include "Common/CommonTypes.h"
 #include "Common/HookableEvent.h"
 #include "Core/CheevoMap/CheevoMapEntry.h"
+#include "Core/CheevoMap/V2/Package.h"
 #include "Core/CheevoMap/V2/StateStore.h"
 
 namespace Core
@@ -57,9 +58,12 @@ private:
 
   void LoadForGameId(const std::string& game_id);
   void Evaluate(const Core::CPUThreadGuard* guard);
+  void EvaluateV1(const Core::CPUThreadGuard& guard);
+  void EvaluateV2(const Core::CPUThreadGuard& guard);
 
   mutable std::mutex m_lock;
   std::optional<File> m_file;
+  std::optional<V2::Package> m_v2_package;
   std::vector<LiveValue> m_live;
   std::string m_loaded_game_id;
   u64 m_generation = 0;

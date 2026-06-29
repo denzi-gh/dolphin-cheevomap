@@ -4,6 +4,7 @@ add_dolphin_test(CoreTimingTest CoreTimingTest.cpp)
 add_dolphin_test(PatchAllowlistTest PatchAllowlistTest.cpp)
 add_dolphin_test(CheevoMapTest
   CheevoMap/EvaluatorTest.cpp
+  CheevoMap/V2PackageTest.cpp
   CheevoMap/StateStoreTest.cpp
 )
 

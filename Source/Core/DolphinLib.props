@@ -201,6 +201,10 @@
     <ClInclude Include="Core\CheevoMap\CheevoMapManager.h" />
     <ClInclude Include="Core\CheevoMap\Dolphin\DolphinEmulatorDataSource.h" />
     <ClInclude Include="Core\CheevoMap\V2\EmulatorDataSource.h" />
+    <ClInclude Include="Core\CheevoMap\V2\Package.h" />
+    <ClInclude Include="Core\CheevoMap\V2\PackageParser.h" />
+    <ClInclude Include="Core\CheevoMap\V2\ReadPlanner.h" />
+    <ClInclude Include="Core\CheevoMap\V2\Runtime.h" />
     <ClInclude Include="Core\CheevoMap\V2\StateStore.h" />
     <ClInclude Include="Core\CheevoMap\V2\StateValue.h" />
     <ClInclude Include="Core\CommonTitles.h" />
@@ -918,6 +922,10 @@
     <ClCompile Include="Core\CheevoMap\CheevoMapManager.cpp" />
     <ClCompile Include="Core\CheevoMap\Dolphin\DolphinEmulatorDataSource.cpp" />
     <ClCompile Include="Core\CheevoMap\V2\EmulatorDataSource.cpp" />
+    <ClCompile Include="Core\CheevoMap\V2\Package.cpp" />
+    <ClCompile Include="Core\CheevoMap\V2\PackageParser.cpp" />
+    <ClCompile Include="Core\CheevoMap\V2\ReadPlanner.cpp" />
+    <ClCompile Include="Core\CheevoMap\V2\Runtime.cpp" />
     <ClCompile Include="Core\CheevoMap\V2\StateStore.cpp" />
     <ClCompile Include="Core\CheevoMap\V2\StateValue.cpp" />
     <ClCompile Include="Core\Config\AchievementSettings.cpp" />

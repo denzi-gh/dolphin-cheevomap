@@ -7,6 +7,7 @@
 #include <cctype>
 #include <charconv>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -16,6 +17,7 @@
 
 #include "Common/CommonTypes.h"
 #include "Common/JsonUtil.h"
+#include "Core/CheevoMap/V2/PackageParser.h"
 
 namespace CheevoMap
 {
@@ -698,6 +700,55 @@ std::optional<File> LoadFromFile(const std::string& json_path, std::string* erro
   }
 
   return file;
+}
+
+std::optional<LoadedPackage> LoadPackageFromFile(const std::string& json_path,
+                                                 std::string* error_out)
+{
+  picojson::value root;
+  std::string parse_err;
+  if (!JsonFromFile(json_path, &root, &parse_err))
+  {
+    *error_out = fmt::format("could not read JSON: {}", parse_err);
+    return std::nullopt;
+  }
+  if (!root.is<picojson::object>())
+  {
+    *error_out = "top-level JSON must be an object";
+    return std::nullopt;
+  }
+
+  const auto& obj = root.get<picojson::object>();
+  const auto schema_it = obj.find("schema_version");
+  if (schema_it == obj.end() || !schema_it->second.is<double>() ||
+      schema_it->second.get<double>() < 0.0 ||
+      schema_it->second.get<double>() > static_cast<double>(std::numeric_limits<u32>::max()) ||
+      schema_it->second.get<double>() !=
+          static_cast<double>(static_cast<u32>(schema_it->second.get<double>())))
+  {
+    *error_out = "missing or invalid schema_version";
+    return std::nullopt;
+  }
+
+  const u32 schema = static_cast<u32>(schema_it->second.get<double>());
+  if (schema == 1)
+  {
+    auto file = LoadFromFile(json_path, error_out);
+    if (!file)
+      return std::nullopt;
+    return LoadedPackage{std::move(*file)};
+  }
+
+  if (schema == 2)
+  {
+    auto package = V2::ParsePackage(root, error_out);
+    if (!package)
+      return std::nullopt;
+    return LoadedPackage{std::move(*package)};
+  }
+
+  *error_out = fmt::format("unsupported schema_version {} (only 1 and 2 are known)", schema);
+  return std::nullopt;
 }
 
 }  // namespace CheevoMap

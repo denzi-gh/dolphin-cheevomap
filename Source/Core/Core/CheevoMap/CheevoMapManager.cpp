@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "Common/CommonPaths.h"
@@ -14,6 +15,7 @@
 #include "Core/CheevoMap/CheevoMapEvaluator.h"
 #include "Core/CheevoMap/Dolphin/DolphinEmulatorDataSource.h"
 #include "Core/CheevoMap/CheevoMapFile.h"
+#include "Core/CheevoMap/V2/Runtime.h"
 #include "Core/ConfigManager.h"
 #include "Core/Core.h"
 #include "Core/System.h"
@@ -90,6 +92,7 @@ void Manager::CloseGame()
   {
     std::lock_guard lg(m_lock);
     m_file.reset();
+    m_v2_package.reset();
     m_live.clear();
     m_loaded_game_id.clear();
     ++m_generation;
@@ -103,10 +106,11 @@ void Manager::LoadForGameId(const std::string& game_id)
 {
   {
     std::lock_guard lg(m_lock);
-    if (m_loaded_game_id == game_id && m_file.has_value())
+    if (m_loaded_game_id == game_id && (m_file.has_value() || m_v2_package.has_value()))
       return;
 
     m_file.reset();
+    m_v2_package.reset();
     m_live.clear();
     m_loaded_game_id = game_id;
     ++m_generation;
@@ -130,7 +134,7 @@ void Manager::LoadForGameId(const std::string& game_id)
   }
 
   std::string err;
-  auto loaded = LoadFromFile(path, &err);
+  auto loaded = LoadPackageFromFile(path, &err);
   if (!loaded)
   {
     WARN_LOG_FMT(CORE, "CheevoMap: failed to load '{}': {}", path, err);
@@ -138,36 +142,73 @@ void Manager::LoadForGameId(const std::string& game_id)
     m_updated_event.Trigger();
     return;
   }
-  if (loaded->game_id != game_id)
+
+  if (auto* v1 = std::get_if<File>(&*loaded))
   {
-    WARN_LOG_FMT(CORE, "CheevoMap: file '{}' game_id '{}' does not match running game '{}'",
-                 path, loaded->game_id, game_id);
+    if (v1->game_id != game_id)
+    {
+      WARN_LOG_FMT(CORE, "CheevoMap: file '{}' game_id '{}' does not match running game '{}'",
+                   path, v1->game_id, game_id);
+      m_v2_state.Reset({});
+      m_updated_event.Trigger();
+      return;
+    }
+
+    std::vector<LiveValue> live_values;
+    V2::StateValueMap initial_state;
+    live_values.resize(v1->entries.size());
+    for (size_t i = 0; i < v1->entries.size(); ++i)
+    {
+      const auto& def = v1->entries[i];
+      live_values[i] = MakeInitialLiveValue(def);
+      initial_state.emplace(def.id, V2::StateValue::Unavailable());
+    }
+
+    const std::string title = v1->title;
+    const size_t entry_count = v1->entries.size();
+    {
+      std::lock_guard lg(m_lock);
+      if (m_loaded_game_id != game_id)
+        return;
+      m_live = std::move(live_values);
+      m_file = std::move(*v1);
+    }
+    m_v2_state.Reset(std::move(initial_state));
+    INFO_LOG_FMT(CORE, "CheevoMap: loaded '{}' ({} schema v1 entries) from {}", title,
+                 entry_count, path);
+    m_updated_event.Trigger();
+    return;
+  }
+
+  auto* v2 = std::get_if<V2::Package>(&*loaded);
+  if (v2 == nullptr)
+    return;
+
+  if (v2->game.id != game_id)
+  {
+    WARN_LOG_FMT(CORE, "CheevoMap: file '{}' game id '{}' does not match running game '{}'",
+                 path, v2->game.id, game_id);
     m_v2_state.Reset({});
     m_updated_event.Trigger();
     return;
   }
 
-  std::vector<LiveValue> live_values;
   V2::StateValueMap initial_state;
-  live_values.resize(loaded->entries.size());
-  for (size_t i = 0; i < loaded->entries.size(); ++i)
-  {
-    const auto& def = loaded->entries[i];
-    live_values[i] = MakeInitialLiveValue(def);
-    initial_state.emplace(def.id, V2::StateValue::Unavailable());
-  }
+  for (const V2::ValueDefinition& value : v2->values)
+    initial_state.emplace(value.id, V2::StateValue::Unavailable());
 
-  const std::string title = loaded->title;
-  const size_t entry_count = loaded->entries.size();
+  const std::string title = v2->metadata.title;
+  const size_t value_count = v2->values.size();
   {
     std::lock_guard lg(m_lock);
     if (m_loaded_game_id != game_id)
       return;
-    m_live = std::move(live_values);
-    m_file = std::move(loaded);
+    m_live.clear();
+    m_v2_package = std::move(*v2);
   }
   m_v2_state.Reset(std::move(initial_state));
-  INFO_LOG_FMT(CORE, "CheevoMap: loaded '{}' ({} entries) from {}", title, entry_count, path);
+  INFO_LOG_FMT(CORE, "CheevoMap: loaded '{}' ({} schema v2 values) from {}", title, value_count,
+               path);
   m_updated_event.Trigger();
 }
 
@@ -196,9 +237,10 @@ void Manager::DoFrame()
   const auto now = std::chrono::steady_clock::now();
   {
     std::lock_guard lg(m_lock);
-    if (!m_file)
+    if (!m_file && !m_v2_package)
       return;
-    const double interval_ms = 1000.0 / m_file->poll_hz;
+    const double poll_hz = m_file ? m_file->poll_hz : m_v2_package->poll_hz;
+    const double interval_ms = 1000.0 / poll_hz;
     if (m_last_poll != std::chrono::steady_clock::time_point{} &&
         std::chrono::duration<double, std::milli>(now - m_last_poll).count() < interval_ms)
     {
@@ -216,6 +258,20 @@ void Manager::Evaluate(const Core::CPUThreadGuard* guard)
   if (!guard)
     return;
 
+  bool use_v2 = false;
+  {
+    std::lock_guard lg(m_lock);
+    use_v2 = m_v2_package.has_value();
+  }
+
+  if (use_v2)
+    EvaluateV2(*guard);
+  else
+    EvaluateV1(*guard);
+}
+
+void Manager::EvaluateV1(const Core::CPUThreadGuard& guard)
+{
   u64 generation = 0;
   u64 v2_session_id = 0;
   std::vector<EntryDef> entries;
@@ -237,7 +293,7 @@ void Manager::Evaluate(const Core::CPUThreadGuard* guard)
   bool any_changed = false;
   V2::StateValueMap v2_values;
   std::vector<std::string> v2_removed;
-  Dolphin::DolphinEmulatorDataSource data_source(*guard);
+  Dolphin::DolphinEmulatorDataSource data_source(guard);
 #ifdef USE_RETRO_ACHIEVEMENTS
   RetroAchievementStateSource achievements;
   const AchievementStateSource* achievement_source = &achievements;
@@ -283,16 +339,56 @@ void Manager::Evaluate(const Core::CPUThreadGuard* guard)
     m_updated_event.Trigger();
 }
 
+void Manager::EvaluateV2(const Core::CPUThreadGuard& guard)
+{
+  u64 generation = 0;
+  u64 v2_session_id = 0;
+  V2::Package package;
+  {
+    std::lock_guard lg(m_lock);
+    if (!m_v2_package)
+      return;
+
+    generation = m_generation;
+    package = *m_v2_package;
+  }
+  v2_session_id = m_v2_state.GetSnapshot().session_id;
+
+  Dolphin::DolphinEmulatorDataSource data_source(guard);
+  std::string error;
+  const auto result = V2::EvaluatePackage(package, data_source, &error);
+  if (!result)
+  {
+    WARN_LOG_FMT(CORE, "CheevoMap: schema v2 evaluation failed: {}", error);
+    return;
+  }
+
+  {
+    std::lock_guard lg(m_lock);
+    if (!m_v2_package || m_generation != generation)
+      return;
+  }
+
+  const V2::StateApplyResult v2_result =
+      m_v2_state.ApplyChangesForSession(v2_session_id, result->values);
+  if (v2_result.status == V2::StateApplyStatus::StaleSession)
+    return;
+}
+
 bool Manager::IsLoaded() const
 {
   std::lock_guard lg(m_lock);
-  return m_file.has_value();
+  return m_file.has_value() || m_v2_package.has_value();
 }
 
 std::string Manager::GetCurrentTitle() const
 {
   std::lock_guard lg(m_lock);
-  return m_file ? m_file->title : std::string{};
+  if (m_file)
+    return m_file->title;
+  if (m_v2_package)
+    return m_v2_package->metadata.title;
+  return {};
 }
 
 std::vector<LiveValue> Manager::GetSnapshot() const

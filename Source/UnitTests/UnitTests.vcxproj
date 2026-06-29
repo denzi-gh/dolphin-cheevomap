@@ -63,6 +63,7 @@
     <ClCompile Include="Common\WorkQueueThreadTest.cpp" />
     <ClCompile Include="Core\CheevoMap\EvaluatorTest.cpp" />
     <ClCompile Include="Core\CheevoMap\StateStoreTest.cpp" />
+    <ClCompile Include="Core\CheevoMap\V2PackageTest.cpp" />
     <ClCompile Include="Core\CoreTimingTest.cpp" />
     <ClCompile Include="Core\DSP\DSPAcceleratorTest.cpp" />
     <ClCompile Include="Core\DSP\DSPAssemblyTest.cpp" />
