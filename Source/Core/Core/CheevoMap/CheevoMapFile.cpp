@@ -720,17 +720,13 @@ std::optional<LoadedPackage> LoadPackageFromFile(const std::string& json_path,
 
   const auto& obj = root.get<picojson::object>();
   const auto schema_it = obj.find("schema_version");
-  if (schema_it == obj.end() || !schema_it->second.is<double>() ||
-      schema_it->second.get<double>() < 0.0 ||
-      schema_it->second.get<double>() > static_cast<double>(std::numeric_limits<u32>::max()) ||
-      schema_it->second.get<double>() !=
-          static_cast<double>(static_cast<u32>(schema_it->second.get<double>())))
+  u32 schema = 0;
+  if (schema_it == obj.end() || !V2::ReadJsonU32(schema_it->second, &schema))
   {
     *error_out = "missing or invalid schema_version";
     return std::nullopt;
   }
 
-  const u32 schema = static_cast<u32>(schema_it->second.get<double>());
   if (schema == 1)
   {
     auto file = LoadFromFile(json_path, error_out);

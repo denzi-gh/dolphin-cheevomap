@@ -17,12 +17,27 @@ struct EvaluationResult
   StateValueMap values;
 };
 
+enum class PackageRuntimeStatus : u8
+{
+  Applied,
+  NoChanges,
+  StaleSession,
+  EvaluationFailed,
+};
+
+struct PackageRuntimeResult
+{
+  PackageRuntimeStatus status = PackageRuntimeStatus::EvaluationFailed;
+  std::optional<StateUpdate> update;
+};
+
+bool ValidatePackageGameIdentity(const GameInfo& package_game, const GameIdentity& running_game,
+                                 std::string* error_out);
 std::optional<EvaluationResult> EvaluatePackage(const Package& package,
                                                 const EmulatorDataSource& data_source,
                                                 std::string* error_out);
-StateApplyResult EvaluatePackageForSession(const Package& package,
-                                           const EmulatorDataSource& data_source,
-                                           StateStore* state_store,
-                                           u64 expected_session_id,
-                                           std::string* error_out);
+PackageRuntimeResult EvaluatePackageForSession(const Package& package,
+                                               const EmulatorDataSource& data_source,
+                                               StateStore& state_store, u64 expected_session_id,
+                                               std::string* error_out);
 }  // namespace CheevoMap::V2

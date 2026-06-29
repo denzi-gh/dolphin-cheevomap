@@ -4,6 +4,7 @@
 #include "Core/CheevoMap/V2/PackageParser.h"
 
 #include <charconv>
+#include <cmath>
 #include <limits>
 #include <set>
 #include <string_view>
@@ -16,18 +17,27 @@ namespace CheevoMap::V2
 {
 namespace
 {
-bool IsIntegerJsonNumber(const picojson::value& value)
+template <typename T>
+bool ReadJsonUnsignedInteger(const picojson::value& value, T max_value, T* out)
 {
   if (!value.is<double>())
     return false;
 
   const double number = value.get<double>();
-  return number >= 0.0 && number <= static_cast<double>(std::numeric_limits<u64>::max()) &&
-         number == static_cast<double>(static_cast<u64>(number));
+  if (!std::isfinite(number) || number < 0.0 || number > static_cast<double>(max_value))
+    return false;
+
+  double integer_part = 0.0;
+  if (std::modf(number, &integer_part) != 0.0)
+    return false;
+
+  *out = static_cast<T>(integer_part);
+  return true;
 }
 
-bool CheckAllowedFields(const picojson::object& object, std::initializer_list<std::string_view> allowed,
-                        std::string_view context, std::string* error)
+bool CheckAllowedFields(const picojson::object& object,
+                        std::initializer_list<std::string_view> allowed, std::string_view context,
+                        std::string* error)
 {
   for (const auto& [key, value] : object)
   {
@@ -83,13 +93,13 @@ bool ParseGame(const picojson::value& value, GameInfo* out, std::string* error)
 
   if (const auto revision_it = object.find("revision"); revision_it != object.end())
   {
-    if (!IsIntegerJsonNumber(revision_it->second) ||
-        revision_it->second.get<double>() > std::numeric_limits<u16>::max())
+    u16 revision = 0;
+    if (!ReadJsonU16(revision_it->second, &revision))
     {
       *error = "game.revision must fit in u16";
       return false;
     }
-    out->revision = static_cast<u16>(revision_it->second.get<double>());
+    out->revision = revision;
   }
 
   return true;
@@ -210,18 +220,18 @@ bool ParseValue(const picojson::value& value, size_t index, ValueDefinition* out
   if (out->type == ValueType::String)
   {
     const auto bytes_it = object.find("bytes");
-    if (bytes_it == object.end() || !IsIntegerJsonNumber(bytes_it->second))
+    u32 bytes = 0;
+    if (bytes_it == object.end() || !ReadJsonUnsignedInteger<u32>(bytes_it->second, 256, &bytes))
     {
       *error = fmt::format("value \"{}\" string requires bytes in 1..256", out->id);
       return false;
     }
-    const u64 bytes = static_cast<u64>(bytes_it->second.get<double>());
-    if (bytes == 0 || bytes > 256)
+    if (bytes == 0)
     {
       *error = fmt::format("value \"{}\" string requires bytes in 1..256", out->id);
       return false;
     }
-    out->bytes = static_cast<u32>(bytes);
+    out->bytes = bytes;
   }
   else if (object.contains("bytes"))
   {
@@ -245,6 +255,16 @@ bool ParseValue(const picojson::value& value, size_t index, ValueDefinition* out
 }
 }  // namespace
 
+bool ReadJsonU32(const picojson::value& value, u32* out)
+{
+  return ReadJsonUnsignedInteger<u32>(value, std::numeric_limits<u32>::max(), out);
+}
+
+bool ReadJsonU16(const picojson::value& value, u16* out)
+{
+  return ReadJsonUnsignedInteger<u16>(value, std::numeric_limits<u16>::max(), out);
+}
+
 std::optional<Package> ParsePackage(const picojson::value& root, std::string* error_out)
 {
   if (!root.is<picojson::object>())
@@ -261,14 +281,13 @@ std::optional<Package> ParsePackage(const picojson::value& root, std::string* er
   }
 
   const auto schema_it = object.find("schema_version");
-  if (schema_it == object.end() || !IsIntegerJsonNumber(schema_it->second) ||
-      schema_it->second.get<double>() > std::numeric_limits<u32>::max())
+  u32 schema = 0;
+  if (schema_it == object.end() || !ReadJsonU32(schema_it->second, &schema))
   {
     *error_out = "missing or invalid schema_version";
     return std::nullopt;
   }
 
-  const u32 schema = static_cast<u32>(schema_it->second.get<double>());
   if (schema != 2)
   {
     *error_out = fmt::format("unsupported schema_version {} (only 2 is known)", schema);
@@ -283,7 +302,8 @@ std::optional<Package> ParsePackage(const picojson::value& root, std::string* er
     return std::nullopt;
 
   const auto package_it = object.find("package");
-  if (package_it == object.end() || !ParseMetadata(package_it->second, &package.metadata, error_out))
+  if (package_it == object.end() ||
+      !ParseMetadata(package_it->second, &package.metadata, error_out))
     return std::nullopt;
 
   if (const auto hz = ReadNumericFromJson<double>(object, "poll_hz"))

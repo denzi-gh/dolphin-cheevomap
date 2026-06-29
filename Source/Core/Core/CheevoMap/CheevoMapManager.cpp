@@ -355,23 +355,22 @@ void Manager::EvaluateV2(const Core::CPUThreadGuard& guard)
   v2_session_id = m_v2_state.GetSnapshot().session_id;
 
   Dolphin::DolphinEmulatorDataSource data_source(guard);
-  std::string error;
-  const auto result = V2::EvaluatePackage(package, data_source, &error);
-  if (!result)
-  {
-    WARN_LOG_FMT(CORE, "CheevoMap: schema v2 evaluation failed: {}", error);
-    return;
-  }
-
   {
     std::lock_guard lg(m_lock);
     if (!m_v2_package || m_generation != generation)
       return;
   }
 
-  const V2::StateApplyResult v2_result =
-      m_v2_state.ApplyChangesForSession(v2_session_id, result->values);
-  if (v2_result.status == V2::StateApplyStatus::StaleSession)
+  std::string error;
+  const V2::PackageRuntimeResult v2_result =
+      V2::EvaluatePackageForSession(package, data_source, m_v2_state, v2_session_id, &error);
+  if (v2_result.status == V2::PackageRuntimeStatus::EvaluationFailed)
+  {
+    WARN_LOG_FMT(CORE, "CheevoMap: schema v2 evaluation failed: {}", error);
+    return;
+  }
+
+  if (v2_result.status == V2::PackageRuntimeStatus::StaleSession)
     return;
 }
 
