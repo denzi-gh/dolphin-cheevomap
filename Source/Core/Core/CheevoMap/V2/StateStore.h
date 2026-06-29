@@ -34,6 +34,19 @@ struct StateUpdate
   std::vector<std::string> removed;
 };
 
+enum class StateApplyStatus : u8
+{
+  Applied,
+  NoChanges,
+  StaleSession,
+};
+
+struct StateApplyResult
+{
+  StateApplyStatus status = StateApplyStatus::NoChanges;
+  std::optional<StateUpdate> update;
+};
+
 class StateStore final
 {
 public:
@@ -42,10 +55,15 @@ public:
   StateUpdate Reset(StateValueMap values = {});
   std::optional<StateUpdate> ApplyChanges(StateValueMap values,
                                           std::vector<std::string> removed = {});
+  StateApplyResult ApplyChangesForSession(u64 expected_session_id, StateValueMap values,
+                                          std::vector<std::string> removed = {});
 
   Common::EventHook RegisterUpdateCallback(std::function<void(const StateUpdate&)> callback);
 
 private:
+  StateApplyResult ApplyChangesInternal(std::optional<u64> expected_session_id,
+                                        StateValueMap values,
+                                        std::vector<std::string> removed);
   void TriggerUpdate(const StateUpdate& update);
 
   mutable std::mutex m_mutex;

@@ -11,6 +11,7 @@
 namespace
 {
 using CheevoMap::V2::StateStore;
+using CheevoMap::V2::StateApplyStatus;
 using CheevoMap::V2::StateUpdate;
 using CheevoMap::V2::StateValue;
 
@@ -80,6 +81,116 @@ TEST(CheevoMapStateStore, UnchangedUpdatesAreSuppressed)
   EXPECT_FALSE(store.ApplyChanges({{"coins", StateValue::UnsignedInteger(3)}}));
   EXPECT_TRUE(updates.empty());
   EXPECT_EQ(store.GetSnapshot().sequence, 1u);
+}
+
+TEST(CheevoMapStateStore, CurrentSessionConditionalUpdatePublishesDelta)
+{
+  StateStore store;
+  const StateUpdate reset = store.Reset({{"coins", StateValue::UnsignedInteger(3)}});
+
+  std::vector<StateUpdate> updates;
+  auto hook = store.RegisterUpdateCallback([&updates](const StateUpdate& update) {
+    updates.push_back(update);
+  });
+  (void)hook;
+
+  const auto result = store.ApplyChangesForSession(
+      reset.session_id, {{"coins", StateValue::UnsignedInteger(4)}});
+
+  EXPECT_EQ(result.status, StateApplyStatus::Applied);
+  ASSERT_TRUE(result.update);
+  EXPECT_EQ(result.update->session_id, reset.session_id);
+  EXPECT_EQ(result.update->sequence, 2u);
+  ASSERT_TRUE(result.update->values.at("coins").AsUnsignedInteger());
+  EXPECT_EQ(*result.update->values.at("coins").AsUnsignedInteger(), 4u);
+  ASSERT_EQ(updates.size(), 1u);
+
+  const auto snapshot = store.GetSnapshot();
+  EXPECT_EQ(snapshot.session_id, reset.session_id);
+  EXPECT_EQ(snapshot.sequence, 2u);
+  ASSERT_TRUE(snapshot.values.at("coins").AsUnsignedInteger());
+  EXPECT_EQ(*snapshot.values.at("coins").AsUnsignedInteger(), 4u);
+}
+
+TEST(CheevoMapStateStore, ConditionalUpdateDistinguishesNoChangeFromStaleSession)
+{
+  StateStore store;
+  const StateUpdate first = store.Reset({{"coins", StateValue::UnsignedInteger(3)}});
+
+  std::vector<StateUpdate> updates;
+  auto hook = store.RegisterUpdateCallback([&updates](const StateUpdate& update) {
+    updates.push_back(update);
+  });
+  (void)hook;
+
+  const auto no_change = store.ApplyChangesForSession(
+      first.session_id, {{"coins", StateValue::UnsignedInteger(3)}});
+  EXPECT_EQ(no_change.status, StateApplyStatus::NoChanges);
+  EXPECT_FALSE(no_change.update);
+  EXPECT_TRUE(updates.empty());
+
+  const StateUpdate second = store.Reset({{"coins", StateValue::UnsignedInteger(0)}});
+  ASSERT_EQ(updates.size(), 1u);
+
+  const auto stale = store.ApplyChangesForSession(
+      first.session_id, {{"coins", StateValue::UnsignedInteger(9)}});
+  EXPECT_EQ(stale.status, StateApplyStatus::StaleSession);
+  EXPECT_FALSE(stale.update);
+  ASSERT_EQ(updates.size(), 1u);
+
+  const auto snapshot = store.GetSnapshot();
+  EXPECT_EQ(snapshot.session_id, second.session_id);
+  EXPECT_EQ(snapshot.sequence, 1u);
+  ASSERT_TRUE(snapshot.values.at("coins").AsUnsignedInteger());
+  EXPECT_EQ(*snapshot.values.at("coins").AsUnsignedInteger(), 0u);
+}
+
+TEST(CheevoMapStateStore, StaleUpdateAfterResetCannotRepopulateNewSession)
+{
+  StateStore store;
+  const StateUpdate old_session = store.Reset({{"coins", StateValue::UnsignedInteger(3)}});
+
+  std::vector<StateUpdate> updates;
+  auto hook = store.RegisterUpdateCallback([&updates](const StateUpdate& update) {
+    updates.push_back(update);
+  });
+  (void)hook;
+
+  const StateUpdate new_session = store.Reset({});
+  ASSERT_EQ(updates.size(), 1u);
+
+  const auto stale = store.ApplyChangesForSession(
+      old_session.session_id, {{"coins", StateValue::UnsignedInteger(99)}});
+
+  EXPECT_EQ(stale.status, StateApplyStatus::StaleSession);
+  EXPECT_FALSE(stale.update);
+  ASSERT_EQ(updates.size(), 1u);
+  EXPECT_EQ(updates.front().session_id, new_session.session_id);
+  EXPECT_TRUE(store.GetSnapshot().values.empty());
+  EXPECT_EQ(store.GetSnapshot().session_id, new_session.session_id);
+}
+
+TEST(CheevoMapStateStore, LifecycleCloseAndReloadRejectOlderEvaluationResults)
+{
+  StateStore store;
+  const StateUpdate game_session = store.Reset({{"coins", StateValue::Unavailable()}});
+
+  const StateUpdate close_session = store.Reset({});
+  const auto stale_game_update = store.ApplyChangesForSession(
+      game_session.session_id, {{"coins", StateValue::UnsignedInteger(99)}});
+  EXPECT_EQ(stale_game_update.status, StateApplyStatus::StaleSession);
+  EXPECT_EQ(store.GetSnapshot().session_id, close_session.session_id);
+  EXPECT_TRUE(store.GetSnapshot().values.empty());
+
+  const StateUpdate reload_session = store.Reset({{"coins", StateValue::Unavailable()}});
+  const auto stale_close_update = store.ApplyChangesForSession(
+      close_session.session_id, {{"coins", StateValue::UnsignedInteger(100)}});
+
+  EXPECT_EQ(stale_close_update.status, StateApplyStatus::StaleSession);
+  const auto snapshot = store.GetSnapshot();
+  EXPECT_EQ(snapshot.session_id, reload_session.session_id);
+  ASSERT_TRUE(snapshot.values.contains("coins"));
+  EXPECT_FALSE(snapshot.values.at("coins").IsAvailable());
 }
 
 TEST(CheevoMapStateStore, RemovedValuesAreReported)

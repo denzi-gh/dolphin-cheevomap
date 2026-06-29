@@ -217,6 +217,7 @@ void Manager::Evaluate(const Core::CPUThreadGuard* guard)
     return;
 
   u64 generation = 0;
+  u64 v2_session_id = 0;
   std::vector<EntryDef> entries;
   std::vector<LiveValue> live_values;
   {
@@ -228,6 +229,7 @@ void Manager::Evaluate(const Core::CPUThreadGuard* guard)
     entries = m_file->entries;
     live_values = m_live;
   }
+  v2_session_id = m_v2_state.GetSnapshot().session_id;
 
   if (entries.size() != live_values.size())
     return;
@@ -271,7 +273,11 @@ void Manager::Evaluate(const Core::CPUThreadGuard* guard)
     m_live = std::move(live_values);
   }
 
-  m_v2_state.ApplyChanges(std::move(v2_values), std::move(v2_removed));
+  const V2::StateApplyResult v2_result =
+      m_v2_state.ApplyChangesForSession(v2_session_id, std::move(v2_values),
+                                        std::move(v2_removed));
+  if (v2_result.status == V2::StateApplyStatus::StaleSession)
+    return;
 
   if (any_changed)
     m_updated_event.Trigger();

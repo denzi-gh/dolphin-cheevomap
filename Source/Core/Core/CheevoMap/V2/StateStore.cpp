@@ -32,9 +32,24 @@ StateUpdate StateStore::Reset(StateValueMap values)
 std::optional<StateUpdate> StateStore::ApplyChanges(StateValueMap values,
                                                     std::vector<std::string> removed)
 {
+  return ApplyChangesInternal(std::nullopt, std::move(values), std::move(removed)).update;
+}
+
+StateApplyResult StateStore::ApplyChangesForSession(u64 expected_session_id, StateValueMap values,
+                                                    std::vector<std::string> removed)
+{
+  return ApplyChangesInternal(expected_session_id, std::move(values), std::move(removed));
+}
+
+StateApplyResult StateStore::ApplyChangesInternal(std::optional<u64> expected_session_id,
+                                                  StateValueMap values,
+                                                  std::vector<std::string> removed)
+{
   StateUpdate update;
   {
     std::lock_guard lg(m_mutex);
+    if (expected_session_id && *expected_session_id != m_session_id)
+      return {StateApplyStatus::StaleSession, std::nullopt};
 
     StateValueMap changed_values;
     for (auto& [id, value] : values)
@@ -57,7 +72,7 @@ std::optional<StateUpdate> StateStore::ApplyChanges(StateValueMap values,
     actual_removed.erase(std::ranges::unique(actual_removed).begin(), actual_removed.end());
 
     if (changed_values.empty() && actual_removed.empty())
-      return std::nullopt;
+      return {StateApplyStatus::NoChanges, std::nullopt};
 
     ++m_sequence;
     update = StateUpdate{m_session_id, m_sequence, false, std::move(changed_values),
@@ -65,7 +80,7 @@ std::optional<StateUpdate> StateStore::ApplyChanges(StateValueMap values,
   }
 
   TriggerUpdate(update);
-  return update;
+  return {StateApplyStatus::Applied, std::move(update)};
 }
 
 Common::EventHook StateStore::RegisterUpdateCallback(
