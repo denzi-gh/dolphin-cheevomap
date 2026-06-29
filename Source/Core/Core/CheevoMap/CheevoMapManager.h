@@ -23,6 +23,9 @@ class CPUThreadGuard;
 
 namespace CheevoMap
 {
+bool IsV2EvaluationCurrentForGeneration(bool has_v2_package, u64 captured_generation,
+                                        u64 current_generation);
+
 class Manager
 {
 public:

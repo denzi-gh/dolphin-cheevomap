@@ -68,6 +68,12 @@ std::string ResolveJsonPath(const std::string& game_id)
 }
 }  // namespace
 
+bool IsV2EvaluationCurrentForGeneration(bool has_v2_package, u64 captured_generation,
+                                        u64 current_generation)
+{
+  return has_v2_package && captured_generation == current_generation;
+}
+
 Manager& Manager::GetInstance()
 {
   static Manager s_instance;
@@ -342,7 +348,6 @@ void Manager::EvaluateV1(const Core::CPUThreadGuard& guard)
 void Manager::EvaluateV2(const Core::CPUThreadGuard& guard)
 {
   u64 generation = 0;
-  u64 v2_session_id = 0;
   V2::Package package;
   {
     std::lock_guard lg(m_lock);
@@ -352,25 +357,27 @@ void Manager::EvaluateV2(const Core::CPUThreadGuard& guard)
     generation = m_generation;
     package = *m_v2_package;
   }
-  v2_session_id = m_v2_state.GetSnapshot().session_id;
 
+  const u64 v2_session_id = m_v2_state.GetSnapshot().session_id;
   Dolphin::DolphinEmulatorDataSource data_source(guard);
-  {
-    std::lock_guard lg(m_lock);
-    if (!m_v2_package || m_generation != generation)
-      return;
-  }
 
   std::string error;
-  const V2::PackageRuntimeResult v2_result =
-      V2::EvaluatePackageForSession(package, data_source, m_v2_state, v2_session_id, &error);
-  if (v2_result.status == V2::PackageRuntimeStatus::EvaluationFailed)
+  const auto result = V2::EvaluatePackage(package, data_source, &error);
+  if (!result)
   {
     WARN_LOG_FMT(CORE, "CheevoMap: schema v2 evaluation failed: {}", error);
     return;
   }
 
-  if (v2_result.status == V2::PackageRuntimeStatus::StaleSession)
+  {
+    std::lock_guard lg(m_lock);
+    if (!IsV2EvaluationCurrentForGeneration(m_v2_package.has_value(), generation, m_generation))
+      return;
+  }
+
+  const V2::StateApplyResult v2_result =
+      m_v2_state.ApplyChangesForSession(v2_session_id, result->values);
+  if (v2_result.status == V2::StateApplyStatus::StaleSession)
     return;
 }
 

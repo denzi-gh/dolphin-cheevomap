@@ -4,6 +4,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <initializer_list>
 #include <limits>
 #include <map>
@@ -19,12 +20,14 @@
 #include <picojson.h>
 
 #include "Core/CheevoMap/CheevoMapFile.h"
+#include "Core/CheevoMap/CheevoMapManager.h"
 #include "Core/CheevoMap/V2/PackageParser.h"
 #include "Core/CheevoMap/V2/ReadPlanner.h"
 #include "Core/CheevoMap/V2/Runtime.h"
 
 namespace
 {
+using CheevoMap::IsV2EvaluationCurrentForGeneration;
 using CheevoMap::V2::BuildReadPlan;
 using CheevoMap::V2::DecodeReadResults;
 using CheevoMap::V2::EmulatorDataSource;
@@ -42,6 +45,7 @@ using CheevoMap::V2::Package;
 using CheevoMap::V2::PackageRuntimeStatus;
 using CheevoMap::V2::ParsePackage;
 using CheevoMap::V2::ReadPlan;
+using CheevoMap::V2::StateApplyStatus;
 using CheevoMap::V2::StateStore;
 using CheevoMap::V2::StateUpdate;
 using CheevoMap::V2::StateValue;
@@ -79,6 +83,8 @@ public:
   {
     ++grouped_read_count;
     last_requests = requests;
+    if (on_grouped_read)
+      on_grouped_read();
 
     std::vector<MemoryReadResult> results;
     results.reserve(requests.size());
@@ -121,6 +127,7 @@ public:
   mutable int single_read_count = 0;
   mutable int grouped_read_count = 0;
   mutable std::vector<MemoryReadRequest> last_requests;
+  mutable std::function<void()> on_grouped_read;
   GameIdentity identity{"GAME01", "", 0, 0};
   std::map<u64, u8> memory;
   std::set<u64> failed_addresses;
@@ -665,6 +672,84 @@ TEST(CheevoMapV2RuntimeState, EvaluationFailureIsDistinctFromNoChanges)
   EXPECT_NE(error.find("unknown memory area"), std::string::npos);
   EXPECT_EQ(data_source.grouped_read_count, 0);
   EXPECT_EQ(data_source.single_read_count, 0);
+}
+
+TEST(CheevoMapV2ManagerLifecycle, StaleGenerationAfterReadDoesNotPublish)
+{
+  Package package = ValidPackage();
+  FakeDataSource data_source;
+  data_source.Write(0x10, {0x00, 0x07});
+
+  StateStore store;
+  std::vector<StateUpdate> updates;
+  auto hook = store.RegisterUpdateCallback(
+      [&updates](const StateUpdate& update) { updates.push_back(update); });
+  (void)hook;
+
+  const StateUpdate reset = store.Reset({{"coins", StateValue::Unavailable()}});
+  updates.clear();
+
+  const u64 captured_session_id = reset.session_id;
+  const u64 captured_generation = 4;
+  u64 current_generation = captured_generation;
+  bool has_v2_package = true;
+  bool advanced_during_read = false;
+
+  data_source.on_grouped_read = [&] {
+    ++current_generation;
+    advanced_during_read = true;
+  };
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  ASSERT_TRUE(advanced_during_read);
+
+  if (IsV2EvaluationCurrentForGeneration(has_v2_package, captured_generation, current_generation))
+  {
+    (void)store.ApplyChangesForSession(captured_session_id, result->values);
+  }
+
+  const auto snapshot = store.GetSnapshot();
+  EXPECT_EQ(snapshot.session_id, captured_session_id);
+  EXPECT_FALSE(snapshot.values.at("coins").IsAvailable());
+  EXPECT_TRUE(updates.empty());
+}
+
+TEST(CheevoMapV2ManagerLifecycle, CurrentGenerationAfterReadPublishes)
+{
+  Package package = ValidPackage();
+  FakeDataSource data_source;
+  data_source.Write(0x10, {0x00, 0x08});
+
+  StateStore store;
+  std::vector<StateUpdate> updates;
+  auto hook = store.RegisterUpdateCallback(
+      [&updates](const StateUpdate& update) { updates.push_back(update); });
+  (void)hook;
+
+  const StateUpdate reset = store.Reset({{"coins", StateValue::Unavailable()}});
+  updates.clear();
+
+  const u64 captured_session_id = reset.session_id;
+  const u64 captured_generation = 4;
+  const u64 current_generation = captured_generation;
+  const bool has_v2_package = true;
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+
+  ASSERT_TRUE(
+      IsV2EvaluationCurrentForGeneration(has_v2_package, captured_generation, current_generation));
+  const auto applied = store.ApplyChangesForSession(captured_session_id, result->values);
+  EXPECT_EQ(applied.status, StateApplyStatus::Applied);
+
+  const auto snapshot = store.GetSnapshot();
+  EXPECT_EQ(snapshot.session_id, captured_session_id);
+  EXPECT_EQ(*snapshot.values.at("coins").AsUnsignedInteger(), 8u);
+  ASSERT_EQ(updates.size(), 1u);
+  EXPECT_EQ(*updates.back().values.at("coins").AsUnsignedInteger(), 8u);
 }
 
 TEST(CheevoMapSchemaDispatch, DelegatesSchemaV1ToExistingParser)
