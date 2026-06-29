@@ -13,6 +13,7 @@
 #include "Common/CommonTypes.h"
 #include "Common/HookableEvent.h"
 #include "Core/CheevoMap/CheevoMapEntry.h"
+#include "Core/CheevoMap/V2/StateStore.h"
 
 namespace Core
 {
@@ -38,9 +39,14 @@ public:
   bool IsLoaded() const;
   std::string GetCurrentTitle() const;
   std::vector<LiveValue> GetSnapshot() const;
+  V2::StateSnapshot GetV2StateSnapshot() const;
 
-  // Fires whenever any value_str changes (or the loaded file changes)
+  // Fires whenever any v1 value_str changes (or the loaded file changes)
   Common::EventHook RegisterUpdatedCallback(std::function<void()> cb);
+
+  // Fires whenever the v2 typed state store publishes a full or delta update
+  Common::EventHook RegisterV2StateUpdatedCallback(
+      std::function<void(const V2::StateUpdate&)> cb);
 
   Manager(const Manager&) = delete;
   Manager& operator=(const Manager&) = delete;
@@ -58,5 +64,6 @@ private:
   std::string m_loaded_game_id;
   std::chrono::steady_clock::time_point m_last_poll{};
   Common::HookableEvent<> m_updated_event;
+  V2::StateStore m_v2_state;
 };
 }  // namespace CheevoMap

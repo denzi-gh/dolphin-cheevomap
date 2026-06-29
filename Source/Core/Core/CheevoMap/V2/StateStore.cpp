@@ -1,0 +1,82 @@
+// Copyright 2026 Dolphin Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#include "Core/CheevoMap/V2/StateStore.h"
+
+#include <algorithm>
+#include <utility>
+
+namespace CheevoMap::V2
+{
+StateSnapshot StateStore::GetSnapshot() const
+{
+  std::lock_guard lg(m_mutex);
+  return StateSnapshot{m_session_id, m_sequence, m_values};
+}
+
+StateUpdate StateStore::Reset(StateValueMap values)
+{
+  StateUpdate update;
+  {
+    std::lock_guard lg(m_mutex);
+    ++m_session_id;
+    m_sequence = 1;
+    m_values = std::move(values);
+    update = StateUpdate{m_session_id, m_sequence, true, m_values, {}};
+  }
+
+  TriggerUpdate(update);
+  return update;
+}
+
+std::optional<StateUpdate> StateStore::ApplyChanges(StateValueMap values,
+                                                    std::vector<std::string> removed)
+{
+  StateUpdate update;
+  {
+    std::lock_guard lg(m_mutex);
+
+    StateValueMap changed_values;
+    for (auto& [id, value] : values)
+    {
+      const auto existing = m_values.find(id);
+      if (existing != m_values.end() && existing->second == value)
+        continue;
+
+      m_values[id] = value;
+      changed_values.emplace(std::move(id), std::move(value));
+    }
+
+    std::vector<std::string> actual_removed;
+    for (std::string& id : removed)
+    {
+      if (m_values.erase(id) != 0)
+        actual_removed.push_back(std::move(id));
+    }
+    std::ranges::sort(actual_removed);
+    actual_removed.erase(std::ranges::unique(actual_removed).begin(), actual_removed.end());
+
+    if (changed_values.empty() && actual_removed.empty())
+      return std::nullopt;
+
+    ++m_sequence;
+    update = StateUpdate{m_session_id, m_sequence, false, std::move(changed_values),
+                         std::move(actual_removed)};
+  }
+
+  TriggerUpdate(update);
+  return update;
+}
+
+Common::EventHook StateStore::RegisterUpdateCallback(
+    std::function<void(const StateUpdate&)> callback)
+{
+  return m_update_event.Register(
+      [callback = std::move(callback)](StateUpdate update) { callback(update); });
+}
+
+void StateStore::TriggerUpdate(const StateUpdate& update)
+{
+  m_update_event.Trigger(update);
+}
+}  // namespace CheevoMap::V2

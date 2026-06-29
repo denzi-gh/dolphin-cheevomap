@@ -24,10 +24,20 @@ add_library(core
   CheatSearch.cpp
   CheatSearch.h
   CheevoMap/CheevoMapEntry.h
+  CheevoMap/CheevoMapEvaluator.cpp
+  CheevoMap/CheevoMapEvaluator.h
   CheevoMap/CheevoMapFile.cpp
   CheevoMap/CheevoMapFile.h
   CheevoMap/CheevoMapManager.cpp
   CheevoMap/CheevoMapManager.h
+  CheevoMap/Dolphin/DolphinEmulatorDataSource.cpp
+  CheevoMap/Dolphin/DolphinEmulatorDataSource.h
+  CheevoMap/V2/EmulatorDataSource.cpp
+  CheevoMap/V2/EmulatorDataSource.h
+  CheevoMap/V2/StateStore.cpp
+  CheevoMap/V2/StateStore.h
+  CheevoMap/V2/StateValue.cpp
+  CheevoMap/V2/StateValue.h
   CommonTitles.h
   Config/AchievementSettings.cpp
   Config/AchievementSettings.h

@@ -196,8 +196,13 @@
     <ClInclude Include="Core\CheatGeneration.h" />
     <ClInclude Include="Core\CheatSearch.h" />
     <ClInclude Include="Core\CheevoMap\CheevoMapEntry.h" />
+    <ClInclude Include="Core\CheevoMap\CheevoMapEvaluator.h" />
     <ClInclude Include="Core\CheevoMap\CheevoMapFile.h" />
     <ClInclude Include="Core\CheevoMap\CheevoMapManager.h" />
+    <ClInclude Include="Core\CheevoMap\Dolphin\DolphinEmulatorDataSource.h" />
+    <ClInclude Include="Core\CheevoMap\V2\EmulatorDataSource.h" />
+    <ClInclude Include="Core\CheevoMap\V2\StateStore.h" />
+    <ClInclude Include="Core\CheevoMap\V2\StateValue.h" />
     <ClInclude Include="Core\CommonTitles.h" />
     <ClInclude Include="Core\Config\AchievementSettings.h" />
     <ClInclude Include="Core\Config\DefaultLocale.h" />
@@ -908,8 +913,13 @@
     <ClCompile Include="Core\BootManager.cpp" />
     <ClCompile Include="Core\CheatGeneration.cpp" />
     <ClCompile Include="Core\CheatSearch.cpp" />
+    <ClCompile Include="Core\CheevoMap\CheevoMapEvaluator.cpp" />
     <ClCompile Include="Core\CheevoMap\CheevoMapFile.cpp" />
     <ClCompile Include="Core\CheevoMap\CheevoMapManager.cpp" />
+    <ClCompile Include="Core\CheevoMap\Dolphin\DolphinEmulatorDataSource.cpp" />
+    <ClCompile Include="Core\CheevoMap\V2\EmulatorDataSource.cpp" />
+    <ClCompile Include="Core\CheevoMap\V2\StateStore.cpp" />
+    <ClCompile Include="Core\CheevoMap\V2\StateValue.cpp" />
     <ClCompile Include="Core\Config\AchievementSettings.cpp" />
     <ClCompile Include="Core\Config\DefaultLocale.cpp" />
     <ClCompile Include="Core\Config\FreeLookSettings.cpp" />
