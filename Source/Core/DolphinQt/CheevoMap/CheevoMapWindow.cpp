@@ -97,13 +97,13 @@ QWidget* CheevoMapWindow::CreateEntryWidget(const CheevoMap::LiveValue& value)
 
   if (!value.icon_slots.empty())
   {
-    auto* slots = new QWidget(row);
-    auto* slots_layout = new QHBoxLayout(slots);
+    auto* slots_widget = new QWidget(row);
+    auto* slots_layout = new QHBoxLayout(slots_widget);
     slots_layout->setContentsMargins(0, 0, 0, 0);
     slots_layout->setSpacing(2);
     for (const std::string& path : value.icon_slots)
       slots_layout->addWidget(CreateIconLabel(path, 24));
-    row_layout->addWidget(slots, 0, Qt::AlignTop);
+    row_layout->addWidget(slots_widget, 0, Qt::AlignTop);
   }
 
   auto* text_container = new QWidget(row);
