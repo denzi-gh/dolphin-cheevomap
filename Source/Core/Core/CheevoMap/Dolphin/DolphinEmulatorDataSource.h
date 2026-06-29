@@ -25,8 +25,12 @@ public:
   V2::GameIdentity GetGameIdentity() const override;
   std::vector<V2::MemoryArea> GetMemoryAreas() const override;
   bool ReadMemory(u64 address, u8* out, std::size_t size) const override;
+  std::vector<V2::MemoryReadResult> ReadMemory(
+      const std::vector<V2::MemoryReadRequest>& requests) const override;
 
 private:
+  V2::MemoryReadError ValidateRead(const V2::MemoryReadRequest& request) const;
+
   const Core::CPUThreadGuard& m_guard;
 };
 }  // namespace CheevoMap::Dolphin

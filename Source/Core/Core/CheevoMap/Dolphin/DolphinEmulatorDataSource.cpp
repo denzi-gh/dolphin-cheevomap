@@ -57,17 +57,51 @@ V2::GameIdentity DolphinEmulatorDataSource::GetGameIdentity() const
 std::vector<V2::MemoryArea> DolphinEmulatorDataSource::GetMemoryAreas() const
 {
   return {
-      V2::MemoryArea{"mem1", "MEM1", MEM1_BASE, MEM1_SIZE},
-      V2::MemoryArea{"mem2", "MEM2", MEM2_BASE, MEM2_SIZE},
+      V2::MemoryArea{"mem1", "MEM1", "emulated-physical", MEM1_BASE, MEM1_SIZE},
+      V2::MemoryArea{"mem2", "MEM2", "emulated-physical", MEM2_BASE, MEM2_SIZE},
   };
+}
+
+V2::MemoryReadError DolphinEmulatorDataSource::ValidateRead(
+    const V2::MemoryReadRequest& request) const
+{
+  const bool supported_area = request.memory_area_id.empty() ||
+                              request.memory_area_id == "mem1" ||
+                              request.memory_area_id == "mem2";
+  if (!supported_area)
+    return V2::MemoryReadError::UnsupportedMemoryArea;
+
+  if (request.memory_area_id == "mem1" &&
+      (request.address < MEM1_BASE || request.address > MEM1_BASE + MEM1_SIZE ||
+       request.size > MEM1_BASE + MEM1_SIZE - request.address))
+  {
+    return V2::MemoryReadError::InvalidAddress;
+  }
+  if (request.memory_area_id == "mem2" &&
+      (request.address < MEM2_BASE || request.address > MEM2_BASE + MEM2_SIZE ||
+       request.size > MEM2_BASE + MEM2_SIZE - request.address))
+  {
+    return V2::MemoryReadError::InvalidAddress;
+  }
+
+  constexpr u64 ADDRESS_LIMIT = static_cast<u64>(std::numeric_limits<u32>::max()) + 1;
+  if (request.address > std::numeric_limits<u32>::max() || request.size > ADDRESS_LIMIT ||
+      request.size > ADDRESS_LIMIT - request.address)
+  {
+    return V2::MemoryReadError::InvalidAddress;
+  }
+
+  return V2::MemoryReadError::None;
 }
 
 bool DolphinEmulatorDataSource::ReadMemory(u64 address, u8* out, std::size_t size) const
 {
   if (out == nullptr && size != 0)
     return false;
-  if (address > std::numeric_limits<u32>::max() || size > std::numeric_limits<u32>::max() ||
-      address + size > static_cast<u64>(std::numeric_limits<u32>::max()) + 1)
+
+  const V2::MemoryReadRequest request{{}, address, static_cast<u32>(size)};
+  if (size > std::numeric_limits<u32>::max() ||
+      ValidateRead(request) != V2::MemoryReadError::None)
   {
     return false;
   }
@@ -84,5 +118,33 @@ bool DolphinEmulatorDataSource::ReadMemory(u64 address, u8* out, std::size_t siz
   }
 
   return true;
+}
+
+std::vector<V2::MemoryReadResult> DolphinEmulatorDataSource::ReadMemory(
+    const std::vector<V2::MemoryReadRequest>& requests) const
+{
+  std::vector<V2::MemoryReadResult> results;
+  results.reserve(requests.size());
+
+  for (const V2::MemoryReadRequest& request : requests)
+  {
+    V2::MemoryReadResult result;
+    result.request = request;
+    result.error = ValidateRead(request);
+    if (result.error == V2::MemoryReadError::None)
+    {
+      result.bytes.resize(request.size);
+      result.success =
+          request.size == 0 || ReadMemory(request.address, result.bytes.data(), result.bytes.size());
+      if (!result.success)
+      {
+        result.error = V2::MemoryReadError::UnmappedAddress;
+        result.bytes.clear();
+      }
+    }
+    results.push_back(std::move(result));
+  }
+
+  return results;
 }
 }  // namespace CheevoMap::Dolphin

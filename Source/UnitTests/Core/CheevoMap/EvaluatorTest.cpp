@@ -35,11 +35,15 @@ using CheevoMap::V2::EmulatorDataSource;
 using CheevoMap::V2::EmulatorStatus;
 using CheevoMap::V2::GameIdentity;
 using CheevoMap::V2::MemoryArea;
+using CheevoMap::V2::MemoryReadError;
+using CheevoMap::V2::MemoryReadRequest;
 using CheevoMap::V2::StateValue;
 
 class FakeDataSource final : public EmulatorDataSource
 {
 public:
+  using EmulatorDataSource::ReadMemory;
+
   EmulatorStatus GetStatus() const override { return EmulatorStatus::Running; }
   GameIdentity GetGameIdentity() const override { return GameIdentity{"GAME01", "", 0, 0}; }
   std::vector<MemoryArea> GetMemoryAreas() const override { return {}; }
@@ -180,6 +184,69 @@ TEST(CheevoMapEvaluator, FloatUiRemainsV1ButTypedStateKeepsFraction)
   EXPECT_EQ(live.value_str, "1");
   ASSERT_TRUE(state.AsFloatingPoint());
   EXPECT_DOUBLE_EQ(*state.AsFloatingPoint(), 1.5);
+}
+
+TEST(CheevoMapEvaluator, TypedFloatStatePreservesFractionalAndNearbyValues)
+{
+  FakeDataSource data_source;
+  data_source.Write(0x30, {0x3f, 0x00, 0x00, 0x00});
+  data_source.Write(0x34, {0x3f, 0xa0, 0x00, 0x00});
+  data_source.Write(0x38, {0xbf, 0x00, 0x00, 0x00});
+  data_source.Write(0x3c, {0x3f, 0x80, 0x00, 0x00});
+  data_source.Write(0x40, {0x3f, 0x80, 0x00, 0x01});
+
+  LiveValue half_live = MakeInitialLiveValue(MakeRamEntry("half", ReadType::F32, 0x30));
+  const StateValue half =
+      EvaluateAvailable(MakeRamEntry("half", ReadType::F32, 0x30), data_source, &half_live);
+  LiveValue one_and_quarter_live =
+      MakeInitialLiveValue(MakeRamEntry("one_and_quarter", ReadType::F32, 0x34));
+  const StateValue one_and_quarter = EvaluateAvailable(
+      MakeRamEntry("one_and_quarter", ReadType::F32, 0x34), data_source, &one_and_quarter_live);
+  LiveValue negative_half_live =
+      MakeInitialLiveValue(MakeRamEntry("negative_half", ReadType::F32, 0x38));
+  const StateValue negative_half = EvaluateAvailable(
+      MakeRamEntry("negative_half", ReadType::F32, 0x38), data_source, &negative_half_live);
+  LiveValue one_live = MakeInitialLiveValue(MakeRamEntry("one", ReadType::F32, 0x3c));
+  const StateValue one =
+      EvaluateAvailable(MakeRamEntry("one", ReadType::F32, 0x3c), data_source, &one_live);
+  LiveValue next_live = MakeInitialLiveValue(MakeRamEntry("next", ReadType::F32, 0x40));
+  const StateValue next =
+      EvaluateAvailable(MakeRamEntry("next", ReadType::F32, 0x40), data_source, &next_live);
+
+  ASSERT_TRUE(half.AsFloatingPoint());
+  ASSERT_TRUE(one_and_quarter.AsFloatingPoint());
+  ASSERT_TRUE(negative_half.AsFloatingPoint());
+  ASSERT_TRUE(one.AsFloatingPoint());
+  ASSERT_TRUE(next.AsFloatingPoint());
+  EXPECT_DOUBLE_EQ(*half.AsFloatingPoint(), 0.5);
+  EXPECT_DOUBLE_EQ(*one_and_quarter.AsFloatingPoint(), 1.25);
+  EXPECT_DOUBLE_EQ(*negative_half.AsFloatingPoint(), -0.5);
+  EXPECT_NE(*one.AsFloatingPoint(), *next.AsFloatingPoint());
+}
+
+TEST(CheevoMapDataSource, GroupedReadsKeepOrderAndPerResultFailures)
+{
+  FakeDataSource data_source;
+  data_source.Write(0x10, {0xaa, 0xbb});
+  data_source.Write(0x20, {0xcc});
+
+  const auto results = data_source.ReadMemory({
+      MemoryReadRequest{{}, 0x10, 2},
+      MemoryReadRequest{{}, 0x18, 2},
+      MemoryReadRequest{"unsupported", 0x20, 1},
+      MemoryReadRequest{{}, 0x20, 1},
+  });
+
+  ASSERT_EQ(results.size(), 4u);
+  EXPECT_TRUE(results[0].success);
+  EXPECT_EQ(results[0].bytes, std::vector<u8>({0xaa, 0xbb}));
+  EXPECT_EQ(results[0].request.address, 0x10u);
+  EXPECT_FALSE(results[1].success);
+  EXPECT_EQ(results[1].error, MemoryReadError::ReadFailure);
+  EXPECT_FALSE(results[2].success);
+  EXPECT_EQ(results[2].error, MemoryReadError::UnsupportedMemoryArea);
+  EXPECT_TRUE(results[3].success);
+  EXPECT_EQ(results[3].bytes, std::vector<u8>({0xcc}));
 }
 
 TEST(CheevoMapEvaluator, AsciiValuesTrimSpacesAndMapLabels)

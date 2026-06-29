@@ -92,6 +92,7 @@ void Manager::CloseGame()
     m_file.reset();
     m_live.clear();
     m_loaded_game_id.clear();
+    ++m_generation;
     m_last_poll = {};
   }
   m_v2_state.Reset({});
@@ -108,6 +109,7 @@ void Manager::LoadForGameId(const std::string& game_id)
     m_file.reset();
     m_live.clear();
     m_loaded_game_id = game_id;
+    ++m_generation;
     m_last_poll = {};
   }
 
@@ -206,12 +208,28 @@ void Manager::DoFrame()
   }
 
   Core::CPUThreadGuard guard(Core::System::GetInstance());
-  EvaluateLocked(&guard);
+  Evaluate(&guard);
 }
 
-void Manager::EvaluateLocked(const Core::CPUThreadGuard* guard)
+void Manager::Evaluate(const Core::CPUThreadGuard* guard)
 {
   if (!guard)
+    return;
+
+  u64 generation = 0;
+  std::vector<EntryDef> entries;
+  std::vector<LiveValue> live_values;
+  {
+    std::lock_guard lg(m_lock);
+    if (!m_file)
+      return;
+
+    generation = m_generation;
+    entries = m_file->entries;
+    live_values = m_live;
+  }
+
+  if (entries.size() != live_values.size())
     return;
 
   bool any_changed = false;
@@ -224,30 +242,33 @@ void Manager::EvaluateLocked(const Core::CPUThreadGuard* guard)
 #else
   const AchievementStateSource* achievement_source = nullptr;
 #endif
+
+  for (size_t i = 0; i < entries.size(); ++i)
+  {
+    const auto& def = entries[i];
+    auto& live = live_values[i];
+    const std::string previous = live.value_str;
+    const bool previous_visible = live.visible;
+
+    V2::StateValue state_value;
+    const EvaluationStatus status =
+        EvaluateEntry(def, data_source, achievement_source, &live, &state_value);
+
+    if (status == EvaluationStatus::Hidden)
+      v2_removed.push_back(def.id);
+    else
+      v2_values.emplace(def.id, std::move(state_value));
+
+    if (live.value_str != previous || previous_visible != live.visible)
+      any_changed = true;
+  }
+
   {
     std::lock_guard lg(m_lock);
-    if (!m_file)
+    if (!m_file || m_generation != generation || m_file->entries.size() != entries.size())
       return;
 
-    for (size_t i = 0; i < m_file->entries.size(); ++i)
-    {
-      const auto& def = m_file->entries[i];
-      auto& live = m_live[i];
-      const std::string previous = live.value_str;
-      bool previous_visible = live.visible;
-
-      V2::StateValue state_value;
-      const EvaluationStatus status =
-          EvaluateEntry(def, data_source, achievement_source, &live, &state_value);
-
-      if (status == EvaluationStatus::Hidden)
-        v2_removed.push_back(def.id);
-      else
-        v2_values.emplace(def.id, std::move(state_value));
-
-      if (live.value_str != previous || previous_visible != live.visible)
-        any_changed = true;
-    }
+    m_live = std::move(live_values);
   }
 
   m_v2_state.ApplyChanges(std::move(v2_values), std::move(v2_removed));

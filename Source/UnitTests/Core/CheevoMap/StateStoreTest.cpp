@@ -131,6 +131,78 @@ TEST(CheevoMapStateStore, MultipleListenersReceiveUpdates)
   EXPECT_EQ(second_count, 2);
 }
 
+TEST(CheevoMapStateStore, DestroyedSubscriptionStopsCallbacks)
+{
+  StateStore store;
+  int count = 0;
+  {
+    auto hook = store.RegisterUpdateCallback([&count](const StateUpdate&) { ++count; });
+    (void)hook;
+    store.Reset({});
+  }
+
+  store.ApplyChanges({{"ready", StateValue::Boolean(true)}});
+
+  EXPECT_EQ(count, 1);
+}
+
+TEST(CheevoMapStateStore, ListenerCanReadSnapshotDuringCallback)
+{
+  StateStore store;
+  bool saw_snapshot = false;
+  auto hook = store.RegisterUpdateCallback([&store, &saw_snapshot](const StateUpdate& update) {
+    const auto snapshot = store.GetSnapshot();
+    saw_snapshot = snapshot.session_id == update.session_id && snapshot.sequence == update.sequence;
+  });
+  (void)hook;
+
+  store.Reset({{"coins", StateValue::UnsignedInteger(3)}});
+
+  EXPECT_TRUE(saw_snapshot);
+}
+
+TEST(CheevoMapStateStore, UnregisteringDuringCallbackSkipsRemovedListener)
+{
+  StateStore store;
+  int first_count = 0;
+  int second_count = 0;
+  Common::EventHook second;
+
+  auto first = store.RegisterUpdateCallback([&](const StateUpdate&) {
+    ++first_count;
+    second.reset();
+  });
+  second = store.RegisterUpdateCallback([&](const StateUpdate&) { ++second_count; });
+  (void)first;
+
+  store.Reset({});
+  store.ApplyChanges({{"ready", StateValue::Boolean(true)}});
+
+  EXPECT_EQ(first_count, 2);
+  EXPECT_EQ(second_count, 0);
+}
+
+TEST(CheevoMapStateStore, ListenerCanRegisterDuringCallback)
+{
+  StateStore store;
+  int first_count = 0;
+  int late_count = 0;
+  Common::EventHook late;
+
+  auto first = store.RegisterUpdateCallback([&](const StateUpdate&) {
+    ++first_count;
+    if (!late)
+      late = store.RegisterUpdateCallback([&](const StateUpdate&) { ++late_count; });
+  });
+  (void)first;
+
+  store.Reset({});
+  store.ApplyChanges({{"ready", StateValue::Boolean(true)}});
+
+  EXPECT_EQ(first_count, 2);
+  EXPECT_EQ(late_count, 2);
+}
+
 TEST(CheevoMapStateStore, FloatingPointValuesKeepFractions)
 {
   StateStore store;

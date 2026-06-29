@@ -56,12 +56,13 @@ private:
   ~Manager() = default;
 
   void LoadForGameId(const std::string& game_id);
-  void EvaluateLocked(const Core::CPUThreadGuard* guard);
+  void Evaluate(const Core::CPUThreadGuard* guard);
 
   mutable std::mutex m_lock;
   std::optional<File> m_file;
   std::vector<LiveValue> m_live;
   std::string m_loaded_game_id;
+  u64 m_generation = 0;
   std::chrono::steady_clock::time_point m_last_poll{};
   Common::HookableEvent<> m_updated_event;
   V2::StateStore m_v2_state;

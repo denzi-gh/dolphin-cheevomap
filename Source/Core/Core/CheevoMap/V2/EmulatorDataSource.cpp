@@ -17,11 +17,21 @@ std::vector<MemoryReadResult> EmulatorDataSource::ReadMemory(
   {
     MemoryReadResult result;
     result.request = request;
+    if (!request.memory_area_id.empty())
+    {
+      result.error = MemoryReadError::UnsupportedMemoryArea;
+      results.push_back(std::move(result));
+      continue;
+    }
+
     result.bytes.resize(request.size);
-    result.success = request.size == 0 || ReadMemory(request.address, result.bytes.data(),
-                                                     result.bytes.size());
+    result.success = request.size == 0 ||
+                     ReadMemory(request.address, result.bytes.data(), result.bytes.size());
     if (!result.success)
+    {
+      result.error = MemoryReadError::ReadFailure;
       result.bytes.clear();
+    }
     results.push_back(std::move(result));
   }
 

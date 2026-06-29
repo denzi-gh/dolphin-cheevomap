@@ -31,20 +31,37 @@ struct MemoryArea
 {
   std::string id;
   std::string label;
+  std::string address_space;
   u64 base_address = 0;
   u64 size = 0;
 };
 
 struct MemoryReadRequest
 {
+  // Empty means the adapter's default address space. Dolphin's current v1 path uses
+  // physical MEM1/MEM2 addresses after the parser strips PowerPC virtual aliases.
+  std::string memory_area_id;
   u64 address = 0;
   u32 size = 0;
+};
+
+enum class MemoryReadError : u8
+{
+  None,
+  EmulatorUnavailable,
+  UnsupportedMemoryArea,
+  InvalidRequest,
+  InvalidAddress,
+  UnmappedAddress,
+  ReadFailure,
+  TemporarilyUnavailable,
 };
 
 struct MemoryReadResult
 {
   MemoryReadRequest request;
   bool success = false;
+  MemoryReadError error = MemoryReadError::None;
   std::vector<u8> bytes;
 };
 
