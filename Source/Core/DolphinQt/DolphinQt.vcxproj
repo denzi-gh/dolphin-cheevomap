@@ -48,6 +48,7 @@
     <ClCompile Include="CheatSearchFactoryWidget.cpp" />
     <ClCompile Include="CheatSearchWidget.cpp" />
     <ClCompile Include="CheatsManager.cpp" />
+    <ClCompile Include="CheevoMap\CheevoMapV2DebugWindow.cpp" />
     <ClCompile Include="CheevoMap\CheevoMapWindow.cpp" />
     <ClCompile Include="Achievements\AchievementBox.cpp" />
     <ClCompile Include="Achievements\AchievementHeaderWidget.cpp" />
@@ -288,6 +289,7 @@
     <QtMoc Include="CheatSearchFactoryWidget.h" />
     <QtMoc Include="CheatSearchWidget.h" />
     <QtMoc Include="CheatsManager.h" />
+    <QtMoc Include="CheevoMap\CheevoMapV2DebugWindow.h" />
     <QtMoc Include="CheevoMap\CheevoMapWindow.h" />
     <QtMoc Include="Achievements\AchievementBox.h" />
     <QtMoc Include="Achievements\AchievementHeaderWidget.h" />

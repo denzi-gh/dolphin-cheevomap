@@ -27,6 +27,7 @@ class AssemblerWidget;
 class BreakpointWidget;
 struct BootParameters;
 class CheatsManager;
+class CheevoMapV2DebugWindow;
 class CheevoMapWindow;
 class CodeWidget;
 class DiscordHandler;
@@ -187,6 +188,7 @@ private:
   void ShowResourcePackManager();
   void ShowCheatsManager();
   void ShowCheevoMapWindow();
+  void ShowCheevoMapV2DebugWindow();
   void ShowRiivolutionBootWidget(const UICommon::GameFile& game);
 
 #ifdef USE_RETRO_ACHIEVEMENTS
@@ -295,5 +297,6 @@ private:
   WatchWidget* m_watch_widget;
   CheatsManager* m_cheats_manager{};
   CheevoMapWindow* m_cheevomap_window = nullptr;
+  CheevoMapV2DebugWindow* m_cheevomap_v2_debug_window = nullptr;
   QByteArray m_render_widget_geometry;
 };

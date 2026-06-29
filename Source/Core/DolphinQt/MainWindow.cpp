@@ -75,8 +75,9 @@
 
 #include "DolphinQt/AboutDialog.h"
 #include "DolphinQt/Achievements/AchievementsWindow.h"
-#include "DolphinQt/CheevoMap/CheevoMapWindow.h"
 #include "DolphinQt/CheatsManager.h"
+#include "DolphinQt/CheevoMap/CheevoMapV2DebugWindow.h"
+#include "DolphinQt/CheevoMap/CheevoMapWindow.h"
 #include "DolphinQt/Config/FreeLookWindow.h"
 #include "DolphinQt/Config/LogConfigWidget.h"
 #include "DolphinQt/Config/LogWidget.h"
@@ -562,6 +563,8 @@ void MainWindow::ConnectMenuBar()
           &MainWindow::ShowResourcePackManager);
   connect(m_menu_bar, &MenuBar::ShowCheatsManager, this, &MainWindow::ShowCheatsManager);
   connect(m_menu_bar, &MenuBar::ShowCheevoMapWindow, this, &MainWindow::ShowCheevoMapWindow);
+  connect(m_menu_bar, &MenuBar::ShowCheevoMapV2DebugWindow, this,
+          &MainWindow::ShowCheevoMapV2DebugWindow);
   connect(m_menu_bar, &MenuBar::BootGameCubeIPL, this, &MainWindow::OnBootGameCubeIPL);
   connect(m_menu_bar, &MenuBar::ImportNANDBackup, this, &MainWindow::OnImportNANDBackup);
   connect(m_menu_bar, &MenuBar::PerformOnlineUpdate, this, &MainWindow::PerformOnlineUpdate);
@@ -2151,6 +2154,17 @@ void MainWindow::ShowCheevoMapWindow()
   m_cheevomap_window->raise();
   m_cheevomap_window->activateWindow();
   m_cheevomap_window->UpdateData();
+}
+
+void MainWindow::ShowCheevoMapV2DebugWindow()
+{
+  if (!m_cheevomap_v2_debug_window)
+    m_cheevomap_v2_debug_window = new CheevoMapV2DebugWindow(this);
+
+  m_cheevomap_v2_debug_window->show();
+  m_cheevomap_v2_debug_window->raise();
+  m_cheevomap_v2_debug_window->activateWindow();
+  m_cheevomap_v2_debug_window->RefreshSnapshot();
 }
 
 void MainWindow::ShowRiivolutionBootWidget(const UICommon::GameFile& game)

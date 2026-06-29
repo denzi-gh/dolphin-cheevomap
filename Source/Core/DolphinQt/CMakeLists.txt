@@ -30,6 +30,8 @@ add_executable(dolphin-emu
   CheatSearchWidget.h
   CheatsManager.cpp
   CheatsManager.h
+  CheevoMap/CheevoMapV2DebugWindow.cpp
+  CheevoMap/CheevoMapV2DebugWindow.h
   CheevoMap/CheevoMapWindow.cpp
   CheevoMap/CheevoMapWindow.h
   Achievements/AchievementBox.cpp

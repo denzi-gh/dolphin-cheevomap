@@ -282,6 +282,8 @@ void MenuBar::AddToolsMenu()
 
   tools_menu->addAction(tr("&Cheats Manager"), this, [this] { emit ShowCheatsManager(); });
   tools_menu->addAction(tr("CheevoMap"), this, [this] { emit ShowCheevoMapWindow(); });
+  tools_menu->addAction(tr("CheevoMap v2 State Inspector"), this,
+                        [this] { emit ShowCheevoMapV2DebugWindow(); });
 
   tools_menu->addAction(tr("FIFO Player"), this, &MenuBar::ShowFIFOPlayer);
 

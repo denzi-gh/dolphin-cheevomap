@@ -97,6 +97,7 @@ signals:
   void ShowAboutDialog();
   void ShowCheatsManager();
   void ShowCheevoMapWindow();
+  void ShowCheevoMapV2DebugWindow();
   void ShowResourcePackManager();
   void ShowSkylanderPortal();
   void ShowInfinityBase();
