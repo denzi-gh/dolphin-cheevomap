@@ -9,6 +9,7 @@
 #include <lzo/lzo1x.h>
 
 #include "Common/FileUtil.h"
+#include "Common/HttpRequest.h"
 #include "Common/IOFile.h"
 #include "Common/MsgHandler.h"
 #include "Common/SFMLHelper.h"
@@ -197,6 +198,12 @@ bool DecompressPacketIntoFile(sf::Packet& packet, const std::string& file_path)
     if (!cur_len)
       break;  // We reached the end of the data stream
 
+    if (cur_len > in_buffer.size())
+    {
+      PanicAlertFmt("LZO error - input is too large");
+      return false;
+    }
+
     for (size_t j = 0; j < cur_len; j++)
     {
       packet >> in_buffer[j];
@@ -281,6 +288,12 @@ std::optional<std::vector<u8>> DecompressPacketIntoBuffer(sf::Packet& packet)
     if (!cur_len)
       break;  // We reached the end of the data stream
 
+    if (cur_len > in_buffer.size())
+    {
+      PanicAlertFmt("LZO error - input is too large");
+      return {};
+    }
+
     for (size_t j = 0; j < cur_len; j++)
     {
       packet >> in_buffer[j];
@@ -297,4 +310,18 @@ std::optional<std::vector<u8>> DecompressPacketIntoBuffer(sf::Packet& packet)
 
   return out_buffer;
 }
+
+std::string GetExternalIPAddress()
+{
+  Common::HttpRequest request;
+  // ENet does not support IPv6, so IPv4 has to be used
+  request.UseIPv4();
+  Common::HttpRequest::Response response =
+      request.Get("https://ip.dolphin-emu.org/", {{"X-Is-Dolphin", "1"}});
+
+  if (response.has_value())
+    return std::string(response->begin(), response->end());
+  return "";
+}
+
 }  // namespace NetPlay

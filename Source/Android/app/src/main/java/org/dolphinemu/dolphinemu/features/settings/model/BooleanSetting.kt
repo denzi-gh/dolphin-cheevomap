@@ -691,7 +691,8 @@ enum class BooleanSetting(
     SYSCONF_WIIMOTE_MOTOR(Settings.FILE_SYSCONF, "BT", "MOT", true),
     GFX_VSYNC(Settings.FILE_GFX, Settings.SECTION_GFX_HARDWARE, "VSync", false),
     GFX_WIDESCREEN_HACK(Settings.FILE_GFX, Settings.SECTION_GFX_SETTINGS, "wideScreenHack", false),
-    GFX_CROP(Settings.FILE_GFX, Settings.SECTION_GFX_SETTINGS, "Crop", false),
+    GFX_CROP_TO_ASPECT_RATIO(Settings.FILE_GFX, Settings.SECTION_GFX_SETTINGS, "Crop", false),
+    GFX_CROP_CUSTOM(Settings.FILE_GFX, Settings.SECTION_GFX_SETTINGS, "CropCustom", false),
     GFX_SHOW_FPS(Settings.FILE_GFX, Settings.SECTION_GFX_SETTINGS, "ShowFPS", false),
     GFX_SHOW_FTIMES(Settings.FILE_GFX, Settings.SECTION_GFX_SETTINGS, "ShowFTimes", false),
     GFX_SHOW_VPS(Settings.FILE_GFX, Settings.SECTION_GFX_SETTINGS, "ShowVPS", false),
@@ -945,7 +946,8 @@ enum class BooleanSetting(
         Settings.SECTION_ACHIEVEMENTS,
         "ProgressEnabled",
         false
-    );
+    ),
+    NETPLAY_USE_UPNP(Settings.FILE_DOLPHIN, Settings.SECTION_INI_NETPLAY, "UseUPNP", false);
 
     override val isOverridden: Boolean
         get() = NativeConfig.isOverridden(file, section, key)
