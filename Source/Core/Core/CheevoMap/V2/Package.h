@@ -56,7 +56,7 @@ struct PointerChainBase
 struct PointerChainRead
 {
   PointerChainBase base;
-  std::string target_area_id;
+  std::vector<std::string> target_area_ids;
   std::vector<u64> offsets;
   PointerType pointer_type = PointerType::U32;
   Endian pointer_endian = Endian::None;

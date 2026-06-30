@@ -49,7 +49,7 @@ struct PendingPointerChainRead
   const ValueDefinition* value = nullptr;
   const PointerChainRead* chain = nullptr;
   size_t root_key_index = 0;
-  MemoryArea target_area;
+  std::vector<PlannedPointerChainTargetArea> target_areas;
 };
 
 struct RuntimePointerChain
@@ -282,11 +282,13 @@ std::optional<ReadPlan> BuildReadPlan(const Package& package,
       return std::nullopt;
     }
 
-    const auto target_area_it = areas.find(chain->target_area_id);
-    if (target_area_it == areas.end())
+    if (chain->target_area_ids.size() != chain->offsets.size())
     {
-      *error_out = fmt::format("value \"{}\" uses unknown pointer_chain.target_area \"{}\"",
-                               value.id, chain->target_area_id);
+      // Every offset has a matching target area: intermediate reads validate against the current
+      // stage's area, while decoded pointers resolve into the next stage's area.
+      *error_out = fmt::format(
+          "value \"{}\" pointer_chain.target_areas must contain exactly one entry per offset",
+          value.id);
       return std::nullopt;
     }
 
@@ -306,16 +308,40 @@ std::optional<ReadPlan> BuildReadPlan(const Package& package,
       return std::nullopt;
     }
 
-    const MemoryArea& target_area = target_area_it->second;
-    if (target_area.size > std::numeric_limits<u64>::max() - target_area.base_address)
+    std::vector<PlannedPointerChainTargetArea> target_areas;
+    target_areas.reserve(chain->target_area_ids.size());
+    for (size_t i = 0; i < chain->target_area_ids.size(); ++i)
     {
-      *error_out = fmt::format("value \"{}\" target memory area \"{}\" overflows", value.id,
-                               chain->target_area_id);
-      return std::nullopt;
+      const std::string& target_area_id = chain->target_area_ids[i];
+      if (target_area_id.empty())
+      {
+        *error_out = fmt::format(
+            "value \"{}\" pointer_chain.target_areas[{}] must be a non-empty string", value.id, i);
+        return std::nullopt;
+      }
+
+      const auto target_area_it = areas.find(target_area_id);
+      if (target_area_it == areas.end())
+      {
+        *error_out = fmt::format("value \"{}\" uses unknown pointer_chain.target_area \"{}\"",
+                                 value.id, target_area_id);
+        return std::nullopt;
+      }
+
+      const MemoryArea& target_area = target_area_it->second;
+      if (target_area.size > std::numeric_limits<u64>::max() - target_area.base_address)
+      {
+        *error_out = fmt::format("value \"{}\" target memory area \"{}\" overflows", value.id,
+                                 target_area_id);
+        return std::nullopt;
+      }
+
+      target_areas.push_back(PlannedPointerChainTargetArea{target_area.id, target_area.base_address,
+                                                           target_area.size});
     }
 
     pointer_chains.push_back(
-        PendingPointerChainRead{&value, chain, initial_keys.size(), target_area});
+        PendingPointerChainRead{&value, chain, initial_keys.size(), std::move(target_areas)});
     initial_keys.push_back(
         ReadKey{chain->base.area_id, base_area.base_address + chain->base.address, pointer_size});
   }
@@ -343,9 +369,7 @@ std::optional<ReadPlan> BuildReadPlan(const Package& package,
     plan.pointer_chains.push_back(PlannedPointerChainRead{
         value.id,
         initial_batch.request_indices[pending.root_key_index],
-        chain.target_area_id,
-        pending.target_area.base_address,
-        pending.target_area.size,
+        pending.target_areas,
         chain.offsets,
         chain.pointer_type,
         chain.pointer_endian,
@@ -381,7 +405,7 @@ StateValueMap EvaluateReadPlan(const ReadPlan& plan, const EmulatorDataSource& d
       if (root)
       {
         const PointerAddressResolution resolved =
-            data_source.ResolvePointerAddress(planned.target_area_id, *root);
+            data_source.ResolvePointerAddress(planned.target_areas.front().id, *root);
         if (resolved.success)
         {
           chain.available = true;
@@ -413,13 +437,16 @@ StateValueMap EvaluateReadPlan(const ReadPlan& plan, const EmulatorDataSource& d
       if (!AddUnsignedOffset(chain.resolved_address, planned.offsets[depth],
                              &pointer_read_address) ||
           !IsRangeInsideArea(pointer_read_address, GetPointerReadSize(planned.pointer_type),
-                             planned.target_base_address, planned.target_size))
+                             planned.target_areas[depth].base_address,
+                             planned.target_areas[depth].size))
       {
         chain.available = false;
         continue;
       }
 
-      keys.push_back(ReadKey{planned.target_area_id, pointer_read_address,
+      // The current area range validates the pointer read the next target area is only used
+      // after the raw pointer has been decoded
+      keys.push_back(ReadKey{planned.target_areas[depth].id, pointer_read_address,
                              GetPointerReadSize(planned.pointer_type)});
       chain_indices.push_back(i);
     }
@@ -450,7 +477,7 @@ StateValueMap EvaluateReadPlan(const ReadPlan& plan, const EmulatorDataSource& d
       }
 
       const PointerAddressResolution resolved =
-          data_source.ResolvePointerAddress(planned.target_area_id, *raw_pointer);
+          data_source.ResolvePointerAddress(planned.target_areas[depth + 1].id, *raw_pointer);
       if (!resolved.success)
       {
         chain.available = false;
@@ -473,14 +500,14 @@ StateValueMap EvaluateReadPlan(const ReadPlan& plan, const EmulatorDataSource& d
 
     u64 final_address = 0;
     if (!AddUnsignedOffset(chain.resolved_address, planned.offsets.back(), &final_address) ||
-        !IsRangeInsideArea(final_address, planned.size, planned.target_base_address,
-                           planned.target_size))
+        !IsRangeInsideArea(final_address, planned.size, planned.target_areas.back().base_address,
+                           planned.target_areas.back().size))
     {
       chain.available = false;
       continue;
     }
 
-    const ReadKey final_key{planned.target_area_id, final_address, planned.size};
+    const ReadKey final_key{planned.target_areas.back().id, final_address, planned.size};
     if (const auto initial_it = initial_request_indices.find(final_key);
         initial_it != initial_request_indices.end())
     {

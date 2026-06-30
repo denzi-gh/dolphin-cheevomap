@@ -216,8 +216,9 @@ bool ParsePointerChain(const picojson::value& value, PointerChainRead* out, std:
   }
 
   const auto& object = value.get<picojson::object>();
-  if (!CheckAllowedFields(object, {"base", "target_area", "offsets", "pointer_type", "endian"},
-                          "read.pointer_chain", error))
+  if (!CheckAllowedFields(
+          object, {"base", "target_area", "target_areas", "offsets", "pointer_type", "endian"},
+          "read.pointer_chain", error))
   {
     return false;
   }
@@ -230,24 +231,6 @@ bool ParsePointerChain(const picojson::value& value, PointerChainRead* out, std:
   }
   if (!ParsePointerChainBase(base_it->second, &out->base, error))
     return false;
-
-  const auto target_area_it = object.find("target_area");
-  if (target_area_it == object.end())
-  {
-    *error = "read.pointer_chain.target_area must be a non-empty string";
-    return false;
-  }
-  if (!target_area_it->second.is<std::string>())
-  {
-    *error = "read.pointer_chain.target_area must be a string";
-    return false;
-  }
-  out->target_area_id = target_area_it->second.get<std::string>();
-  if (out->target_area_id.empty())
-  {
-    *error = "read.pointer_chain.target_area must be a non-empty string";
-    return false;
-  }
 
   const auto offsets_it = object.find("offsets");
   if (offsets_it == object.end())
@@ -279,19 +262,90 @@ bool ParsePointerChain(const picojson::value& value, PointerChainRead* out, std:
   {
     if (!offsets[i].is<std::string>())
     {
-      *error = fmt::format("read.pointer_chain.offsets[{}] must be a 0x-prefixed u64 hex string",
-                           i);
+      *error =
+          fmt::format("read.pointer_chain.offsets[{}] must be a 0x-prefixed u64 hex string", i);
       return false;
     }
 
     u64 offset = 0;
     if (!ParseLowerHexU64(offsets[i].get<std::string>(), &offset))
     {
-      *error = fmt::format("read.pointer_chain.offsets[{}] must be a 0x-prefixed u64 hex string",
-                           i);
+      *error =
+          fmt::format("read.pointer_chain.offsets[{}] must be a 0x-prefixed u64 hex string", i);
       return false;
     }
     out->offsets.push_back(offset);
+  }
+
+  const auto target_area_it = object.find("target_area");
+  const auto target_areas_it = object.find("target_areas");
+  if (target_area_it != object.end() && target_areas_it != object.end())
+  {
+    *error = "read.pointer_chain must contain either target_area or target_areas, not both";
+    return false;
+  }
+  if (target_area_it == object.end() && target_areas_it == object.end())
+  {
+    *error = "read.pointer_chain.target_area or target_areas is required";
+    return false;
+  }
+
+  out->target_area_ids.clear();
+  if (target_area_it != object.end())
+  {
+    if (!target_area_it->second.is<std::string>())
+    {
+      *error = "read.pointer_chain.target_area must be a string";
+      return false;
+    }
+
+    const std::string& target_area_id = target_area_it->second.get<std::string>();
+    if (target_area_id.empty())
+    {
+      *error = "read.pointer_chain.target_area must be a non-empty string";
+      return false;
+    }
+
+    // A single target_area is shorthand for one explicit target area per offset.
+    out->target_area_ids.assign(out->offsets.size(), target_area_id);
+  }
+  else
+  {
+    if (!target_areas_it->second.is<picojson::array>())
+    {
+      *error = "read.pointer_chain.target_areas must be an array";
+      return false;
+    }
+
+    const auto& target_areas = target_areas_it->second.get<picojson::array>();
+    if (target_areas.empty())
+    {
+      *error = "read.pointer_chain.target_areas must contain at least 1 entry";
+      return false;
+    }
+    if (target_areas.size() > 16)
+    {
+      *error = "read.pointer_chain.target_areas must contain at most 16 entries";
+      return false;
+    }
+    if (target_areas.size() != out->offsets.size())
+    {
+      // Each offset belongs to one stage: dereference stages use that stage's current area
+      // and the final offset uses the last target area for the value read.
+      *error = "read.pointer_chain.target_areas must contain exactly one entry per offset";
+      return false;
+    }
+
+    out->target_area_ids.reserve(target_areas.size());
+    for (size_t i = 0; i < target_areas.size(); ++i)
+    {
+      if (!target_areas[i].is<std::string>() || target_areas[i].get<std::string>().empty())
+      {
+        *error = fmt::format("read.pointer_chain.target_areas[{}] must be a non-empty string", i);
+        return false;
+      }
+      out->target_area_ids.push_back(target_areas[i].get<std::string>());
+    }
   }
 
   const auto pointer_type_it = object.find("pointer_type");
