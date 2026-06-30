@@ -49,6 +49,9 @@
     <ClCompile Include="CheatSearchWidget.cpp" />
     <ClCompile Include="CheatsManager.cpp" />
     <ClCompile Include="CheevoMap\CheevoMapV2DebugWindow.cpp" />
+    <ClCompile Include="CheevoMap\CheevoMapV2LocalDashboard.cpp" />
+    <ClCompile Include="CheevoMap\CheevoMapV2LocalDashboardProtocol.cpp" />
+    <ClCompile Include="CheevoMap\CheevoMapV2LocalDashboardServer.cpp" />
     <ClCompile Include="CheevoMap\CheevoMapWindow.cpp" />
     <ClCompile Include="Achievements\AchievementBox.cpp" />
     <ClCompile Include="Achievements\AchievementHeaderWidget.cpp" />
@@ -255,6 +258,9 @@
     also be modified using the VS UI.
     -->
   <ItemGroup>
+    <ClInclude Include="CheevoMap\CheevoMapV2LocalDashboard.h" />
+    <ClInclude Include="CheevoMap\CheevoMapV2LocalDashboardProtocol.h" />
+    <ClInclude Include="CheevoMap\CheevoMapV2LocalDashboardServer.h" />
     <ClInclude Include="Config\CheatCodeEditor.h" />
     <ClInclude Include="Config\ConfigControls\ConfigControl.h" />
     <ClInclude Include="Config\GameConfigEdit.h" />
@@ -475,6 +481,10 @@
     <Natvis Include="qt6.natvis" />
   </ItemGroup>
   <ItemGroup>
+    <Text Include="CheevoMap\Dashboard\app.js" />
+    <Text Include="CheevoMap\Dashboard\index.html" />
+    <Text Include="CheevoMap\Dashboard\style.css" />
+    <QtRcc Include="CheevoMap\CheevoMapV2Dashboard.qrc" />
     <Text Include="Styles\Dark\dark.qss" />
     <QtRcc Include="Styles\Dark\dark.qrc" />
   </ItemGroup>

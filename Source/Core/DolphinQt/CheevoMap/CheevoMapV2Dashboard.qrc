@@ -1,0 +1,7 @@
+<RCC>
+  <qresource prefix="/cheevomap-v2-dashboard">
+    <file>Dashboard/index.html</file>
+    <file>Dashboard/app.js</file>
+    <file>Dashboard/style.css</file>
+  </qresource>
+</RCC>

@@ -13,6 +13,7 @@
 #include <QFontDialog>
 #include <QInputDialog>
 #include <QMap>
+#include <QSignalBlocker>
 #include <QUrl>
 
 #include <fmt/format.h>
@@ -106,6 +107,15 @@ MenuBar::MenuBar(QWidget* parent) : QMenuBar(parent)
   connect(this, &MenuBar::SelectionChanged, this, &MenuBar::OnSelectionChanged);
   connect(this, &MenuBar::RecordingStatusChanged, this, &MenuBar::OnRecordingStatusChanged);
   connect(this, &MenuBar::ReadOnlyModeChanged, this, &MenuBar::OnReadOnlyModeChanged);
+}
+
+void MenuBar::SetCheevoMapV2LocalDashboardChecked(const bool checked)
+{
+  if (!m_cheevomap_v2_local_dashboard_action)
+    return;
+
+  const QSignalBlocker blocker(m_cheevomap_v2_local_dashboard_action);
+  m_cheevomap_v2_local_dashboard_action->setChecked(checked);
 }
 
 void MenuBar::OnEmulationStateChanged(Core::State state)
@@ -284,6 +294,10 @@ void MenuBar::AddToolsMenu()
   tools_menu->addAction(tr("CheevoMap"), this, [this] { emit ShowCheevoMapWindow(); });
   tools_menu->addAction(tr("CheevoMap v2 State Inspector"), this,
                         [this] { emit ShowCheevoMapV2DebugWindow(); });
+  m_cheevomap_v2_local_dashboard_action = tools_menu->addAction(tr("CheevoMap v2 Local Dashboard"));
+  m_cheevomap_v2_local_dashboard_action->setCheckable(true);
+  connect(m_cheevomap_v2_local_dashboard_action, &QAction::toggled, this,
+          [this](bool enabled) { emit ToggleCheevoMapV2LocalDashboard(enabled); });
 
   tools_menu->addAction(tr("FIFO Player"), this, &MenuBar::ShowFIFOPlayer);
 

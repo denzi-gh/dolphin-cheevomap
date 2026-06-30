@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CheevoMap v2 Local Dashboard</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>CheevoMap v2 Local Dashboard</h1>
+      <div id="connection" class="status disconnected">Disconnected</div>
+    </header>
+
+    <section class="summary" aria-label="State summary">
+      <div>
+        <span>Protocol</span>
+        <strong id="protocol">-</strong>
+      </div>
+      <div>
+        <span>Session</span>
+        <strong id="session">0</strong>
+      </div>
+      <div>
+        <span>Sequence</span>
+        <strong id="sequence">0</strong>
+      </div>
+      <div>
+        <span>Values</span>
+        <strong id="count">0</strong>
+      </div>
+    </section>
+
+    <label class="filter">
+      <span>Filter</span>
+      <input id="filter" type="search" autocomplete="off" spellcheck="false">
+    </label>
+
+    <p id="message" class="message">No values are currently available.</p>
+
+    <table aria-label="CheevoMap state values">
+      <thead>
+        <tr>
+          <th scope="col">Value ID</th>
+          <th scope="col">Kind</th>
+          <th scope="col">Value</th>
+        </tr>
+      </thead>
+      <tbody id="values"></tbody>
+    </table>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

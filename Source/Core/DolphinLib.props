@@ -200,6 +200,7 @@
     <ClInclude Include="Core\CheevoMap\CheevoMapFile.h" />
     <ClInclude Include="Core\CheevoMap\CheevoMapManager.h" />
     <ClInclude Include="Core\CheevoMap\Dolphin\DolphinEmulatorDataSource.h" />
+    <ClInclude Include="Core\CheevoMap\V2\DashboardProtocol.h" />
     <ClInclude Include="Core\CheevoMap\V2\EmulatorDataSource.h" />
     <ClInclude Include="Core\CheevoMap\V2\ExpressionEvaluator.h" />
     <ClInclude Include="Core\CheevoMap\V2\Package.h" />
@@ -922,6 +923,7 @@
     <ClCompile Include="Core\CheevoMap\CheevoMapFile.cpp" />
     <ClCompile Include="Core\CheevoMap\CheevoMapManager.cpp" />
     <ClCompile Include="Core\CheevoMap\Dolphin\DolphinEmulatorDataSource.cpp" />
+    <ClCompile Include="Core\CheevoMap\V2\DashboardProtocol.cpp" />
     <ClCompile Include="Core\CheevoMap\V2\EmulatorDataSource.cpp" />
     <ClCompile Include="Core\CheevoMap\V2\ExpressionEvaluator.cpp" />
     <ClCompile Include="Core\CheevoMap\V2\Package.cpp" />

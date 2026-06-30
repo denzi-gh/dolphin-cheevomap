@@ -77,6 +77,7 @@
 #include "DolphinQt/Achievements/AchievementsWindow.h"
 #include "DolphinQt/CheatsManager.h"
 #include "DolphinQt/CheevoMap/CheevoMapV2DebugWindow.h"
+#include "DolphinQt/CheevoMap/CheevoMapV2LocalDashboard.h"
 #include "DolphinQt/CheevoMap/CheevoMapWindow.h"
 #include "DolphinQt/Config/FreeLookWindow.h"
 #include "DolphinQt/Config/LogConfigWidget.h"
@@ -337,6 +338,9 @@ MainWindow::MainWindow(Core::System& system, std::unique_ptr<BootParameters> boo
 
 MainWindow::~MainWindow()
 {
+  if (m_cheevomap_v2_local_dashboard)
+    m_cheevomap_v2_local_dashboard->Stop();
+
   // Shut down NetPlay first to avoid race condition segfault
   Settings::Instance().ResetNetPlayClient();
   Settings::Instance().ResetNetPlayServer();
@@ -565,6 +569,8 @@ void MainWindow::ConnectMenuBar()
   connect(m_menu_bar, &MenuBar::ShowCheevoMapWindow, this, &MainWindow::ShowCheevoMapWindow);
   connect(m_menu_bar, &MenuBar::ShowCheevoMapV2DebugWindow, this,
           &MainWindow::ShowCheevoMapV2DebugWindow);
+  connect(m_menu_bar, &MenuBar::ToggleCheevoMapV2LocalDashboard, this,
+          &MainWindow::ToggleCheevoMapV2LocalDashboard);
   connect(m_menu_bar, &MenuBar::BootGameCubeIPL, this, &MainWindow::OnBootGameCubeIPL);
   connect(m_menu_bar, &MenuBar::ImportNANDBackup, this, &MainWindow::OnImportNANDBackup);
   connect(m_menu_bar, &MenuBar::PerformOnlineUpdate, this, &MainWindow::PerformOnlineUpdate);
@@ -2165,6 +2171,27 @@ void MainWindow::ShowCheevoMapV2DebugWindow()
   m_cheevomap_v2_debug_window->raise();
   m_cheevomap_v2_debug_window->activateWindow();
   m_cheevomap_v2_debug_window->RefreshSnapshot();
+}
+
+void MainWindow::ToggleCheevoMapV2LocalDashboard(const bool enabled)
+{
+  if (!m_cheevomap_v2_local_dashboard)
+    m_cheevomap_v2_local_dashboard = new CheevoMapV2LocalDashboard(this);
+
+  if (!enabled)
+  {
+    m_cheevomap_v2_local_dashboard->Stop();
+    return;
+  }
+
+  std::string error;
+  if (m_cheevomap_v2_local_dashboard->Start(&error))
+    return;
+
+  m_menu_bar->SetCheevoMapV2LocalDashboardChecked(false);
+  ModalMessageBox::critical(this, tr("CheevoMap Local Dashboard"),
+                            tr("Could not start the CheevoMap local dashboard on 127.0.0.1:32123.\n"
+                               "The port may already be in use."));
 }
 
 void MainWindow::ShowRiivolutionBootWidget(const UICommon::GameFile& game)

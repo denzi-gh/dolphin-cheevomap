@@ -30,8 +30,15 @@ add_executable(dolphin-emu
   CheatSearchWidget.h
   CheatsManager.cpp
   CheatsManager.h
+  CheevoMap/CheevoMapV2Dashboard.qrc
   CheevoMap/CheevoMapV2DebugWindow.cpp
   CheevoMap/CheevoMapV2DebugWindow.h
+  CheevoMap/CheevoMapV2LocalDashboard.cpp
+  CheevoMap/CheevoMapV2LocalDashboard.h
+  CheevoMap/CheevoMapV2LocalDashboardProtocol.cpp
+  CheevoMap/CheevoMapV2LocalDashboardProtocol.h
+  CheevoMap/CheevoMapV2LocalDashboardServer.cpp
+  CheevoMap/CheevoMapV2LocalDashboardServer.h
   CheevoMap/CheevoMapWindow.cpp
   CheevoMap/CheevoMapWindow.h
   Achievements/AchievementBox.cpp
@@ -476,6 +483,7 @@ if (WIN32)
   PRIVATE
     gdi32.lib
     shell32.lib
+    ws2_32.lib
     dwmapi.lib # Needed to set window decorations for dark theme
   )
 endif()

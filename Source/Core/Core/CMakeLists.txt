@@ -34,6 +34,8 @@ add_library(core
   CheevoMap/Dolphin/DolphinEmulatorDataSource.h
   CheevoMap/V2/EmulatorDataSource.cpp
   CheevoMap/V2/EmulatorDataSource.h
+  CheevoMap/V2/DashboardProtocol.cpp
+  CheevoMap/V2/DashboardProtocol.h
   CheevoMap/V2/ExpressionEvaluator.cpp
   CheevoMap/V2/ExpressionEvaluator.h
   CheevoMap/V2/Package.cpp

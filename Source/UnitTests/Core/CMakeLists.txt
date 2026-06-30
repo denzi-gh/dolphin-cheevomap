@@ -3,10 +3,18 @@ add_dolphin_test(PageFaultTest PageFaultTest.cpp)
 add_dolphin_test(CoreTimingTest CoreTimingTest.cpp)
 add_dolphin_test(PatchAllowlistTest PatchAllowlistTest.cpp)
 add_dolphin_test(CheevoMapTest
+  CheevoMap/DashboardProtocolTest.cpp
   CheevoMap/EvaluatorTest.cpp
+  CheevoMap/LocalDashboardProtocolTest.cpp
   CheevoMap/V2PackageTest.cpp
   CheevoMap/StateStoreTest.cpp
+  ../../Core/DolphinQt/CheevoMap/CheevoMapV2LocalDashboardProtocol.cpp
+  ../../Core/DolphinQt/CheevoMap/CheevoMapV2LocalDashboardServer.cpp
 )
+
+if(WIN32)
+  target_link_libraries(CheevoMapTest PRIVATE ws2_32.lib)
+endif()
 
 add_dolphin_test(DSPAcceleratorTest DSP/DSPAcceleratorTest.cpp)
 add_dolphin_test(DSPAssemblyTest

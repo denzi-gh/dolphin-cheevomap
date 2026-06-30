@@ -61,7 +61,11 @@
     <ClCompile Include="Common\StringUtilTest.cpp" />
     <ClCompile Include="Common\SwapTest.cpp" />
     <ClCompile Include="Common\WorkQueueThreadTest.cpp" />
+    <ClCompile Include="..\Core\DolphinQt\CheevoMap\CheevoMapV2LocalDashboardProtocol.cpp" />
+    <ClCompile Include="..\Core\DolphinQt\CheevoMap\CheevoMapV2LocalDashboardServer.cpp" />
+    <ClCompile Include="Core\CheevoMap\DashboardProtocolTest.cpp" />
     <ClCompile Include="Core\CheevoMap\EvaluatorTest.cpp" />
+    <ClCompile Include="Core\CheevoMap\LocalDashboardProtocolTest.cpp" />
     <ClCompile Include="Core\CheevoMap\StateStoreTest.cpp" />
     <ClCompile Include="Core\CheevoMap\V2PackageTest.cpp" />
     <ClCompile Include="Core\CoreTimingTest.cpp" />

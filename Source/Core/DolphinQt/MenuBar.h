@@ -50,6 +50,7 @@ public:
 #ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
   void UpdateAchievementDevelopmentMenu();
 #endif  // RC_CLIENT_SUPPORTS_RAINTEGRATION
+  void SetCheevoMapV2LocalDashboardChecked(bool checked);
 
   QMenu* GetListColumnsMenu() const { return m_cols_menu; }
 
@@ -98,6 +99,7 @@ signals:
   void ShowCheatsManager();
   void ShowCheevoMapWindow();
   void ShowCheevoMapV2DebugWindow();
+  void ToggleCheevoMapV2LocalDashboard(bool enabled);
   void ShowResourcePackManager();
   void ShowSkylanderPortal();
   void ShowInfinityBase();
@@ -226,6 +228,7 @@ private:
 #ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
   QMenu* m_achievements_dev_menu;
 #endif  // RC_CLIENT_SUPPORTS_RAINTEGRATION
+  QAction* m_cheevomap_v2_local_dashboard_action = nullptr;
   QAction* m_ntscj_ipl;
   QAction* m_ntscu_ipl;
   QAction* m_pal_ipl;
