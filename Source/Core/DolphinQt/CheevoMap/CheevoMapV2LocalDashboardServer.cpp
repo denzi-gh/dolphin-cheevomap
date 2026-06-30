@@ -295,6 +295,23 @@ struct LocalDashboardServer::Impl
     publication.pending_updates.push_back(std::move(*update));
   }
 
+  void PublishAuthoritativeSnapshot(SerializedSnapshot snapshot)
+  {
+    if (!running.load())
+      return;
+
+    std::lock_guard lock(data_mutex);
+    if (CheevoMap::V2::IsCursorNewer(publication.snapshot.cursor, snapshot.cursor))
+      return;
+
+    publication.snapshot = std::move(snapshot);
+    publication.pending_updates.clear();
+    publication.pending_update_bytes = 0;
+    // Equal-cursor resyncs are intentionally rebroadcast: the caller is asking
+    // every existing SSE client to converge on this authoritative snapshot.
+    publication.snapshot_resync_pending = true;
+  }
+
   void Run()
   {
     auto last_keepalive = std::chrono::steady_clock::now();
@@ -769,5 +786,10 @@ void LocalDashboardServer::PublishSnapshotAndUpdate(SerializedSnapshot snapshot,
                                                     std::optional<SerializedUpdate> update)
 {
   m_impl->PublishSnapshotAndUpdate(std::move(snapshot), std::move(update));
+}
+
+void LocalDashboardServer::PublishAuthoritativeSnapshot(SerializedSnapshot snapshot)
+{
+  m_impl->PublishAuthoritativeSnapshot(std::move(snapshot));
 }
 }  // namespace CheevoMap::LocalDashboard

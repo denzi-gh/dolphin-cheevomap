@@ -2,6 +2,13 @@
 
 const PROTOCOL_VERSION = 1;
 
+const ApplyResult = Object.freeze({
+  Applied: "applied",
+  Ignored: "ignored",
+  Error: "error",
+  ResyncRequested: "resync-requested",
+});
+
 const state = {
   protocolVersion: "-",
   sessionId: "0",
@@ -11,7 +18,10 @@ const state = {
   rows: new Map(),
   filter: "",
   eventSource: null,
+  connectionMode: "disconnected",
 };
+
+let snapshotFetchInFlight = false;
 
 const els = {
   connection: document.getElementById("connection"),
@@ -24,9 +34,16 @@ const els = {
   values: document.getElementById("values"),
 };
 
-function setConnection(label, className) {
+function setConnection(label, className, mode = className) {
   els.connection.textContent = label;
   els.connection.className = `status ${className}`;
+  state.connectionMode = mode;
+}
+
+function setResynchronizing() {
+  setConnection("Resynchronizing", "reconnecting", "resynchronizing");
+  els.message.textContent = "Resynchronizing dashboard state.";
+  els.message.hidden = false;
 }
 
 function validateMessage(message) {
@@ -38,7 +55,7 @@ function validateMessage(message) {
 }
 
 function setProtocolError(message) {
-  setConnection("Protocol error", "error");
+  setConnection("Protocol error", "error", "protocol-error");
   els.message.textContent = message;
   els.message.hidden = false;
 }
@@ -187,15 +204,17 @@ function replaceValues(values) {
 }
 
 function applySnapshot(message) {
+  // Snapshot/update application returns a result so connection events never
+  // infer success from DOM text or CSS state.
   if (!validateMessage(message))
-    return;
+    return ApplyResult.Error;
   const cursor = validateCursor(message);
   if (!cursor)
-    return;
+    return ApplyResult.Error;
 
   if (state.hasCursor &&
       compareCursor(cursor.sessionId, cursor.sequence, state.sessionId, state.sequence) < 0) {
-    return;
+    return ApplyResult.Ignored;
   }
 
   state.protocolVersion = String(message.protocol_version);
@@ -204,36 +223,33 @@ function applySnapshot(message) {
   state.hasCursor = true;
   replaceValues(message.values);
   updateSummary();
+  return ApplyResult.Applied;
 }
 
 function applyUpdate(message) {
   if (!validateMessage(message))
-    return;
+    return ApplyResult.Error;
   const cursor = validateCursor(message);
   if (!cursor)
-    return;
+    return ApplyResult.Error;
 
   if (state.hasCursor) {
     const sessionCompare = compareUnsignedDecimalStrings(cursor.sessionId, state.sessionId);
     if (sessionCompare < 0)
-      return;
+      return ApplyResult.Ignored;
     if (sessionCompare === 0 &&
         compareUnsignedDecimalStrings(cursor.sequence, state.sequence) <= 0) {
-      return;
+      return ApplyResult.Ignored;
     }
     if (sessionCompare > 0 && !message.full) {
-      setConnection("Resynchronizing", "reconnecting");
-      els.message.textContent = "Resynchronizing dashboard state.";
-      els.message.hidden = false;
+      setResynchronizing();
       fetchSnapshot();
-      return;
+      return ApplyResult.ResyncRequested;
     }
   } else if (!message.full) {
-    setConnection("Resynchronizing", "reconnecting");
-    els.message.textContent = "Resynchronizing dashboard state.";
-    els.message.hidden = false;
+    setResynchronizing();
     fetchSnapshot();
-    return;
+    return ApplyResult.ResyncRequested;
   }
 
   state.protocolVersion = String(message.protocol_version);
@@ -261,18 +277,40 @@ function applyUpdate(message) {
   }
 
   updateSummary();
+  return ApplyResult.Applied;
 }
 
 async function fetchSnapshot() {
+  if (snapshotFetchInFlight)
+    return;
+
+  snapshotFetchInFlight = true;
   try {
     const response = await fetch("/api/v1/snapshot", {cache: "no-store"});
     if (!response.ok) {
       setConnection("Snapshot failed", "error");
       return;
     }
-    applySnapshot(await response.json());
+
+    let message;
+    try {
+      message = await response.json();
+    } catch (_) {
+      setProtocolError("Malformed snapshot message.");
+      return;
+    }
+
+    const result = applySnapshot(message);
+    if (result === ApplyResult.Applied) {
+      if (state.eventSource && state.eventSource.readyState === EventSource.OPEN)
+        setConnection("Connected", "connected");
+      else
+        setConnection("Synchronized", "connected");
+    }
   } catch (_) {
     setConnection("Snapshot failed", "error");
+  } finally {
+    snapshotFetchInFlight = false;
   }
 }
 
@@ -283,28 +321,31 @@ function connectEvents() {
   setConnection("Reconnecting", "reconnecting");
   state.eventSource = new EventSource("/api/v1/events");
 
-  state.eventSource.addEventListener("open", () => {
-    setConnection("Connected", "connected");
-  });
   state.eventSource.addEventListener("snapshot", event => {
+    let result = ApplyResult.Error;
     try {
-      applySnapshot(JSON.parse(event.data));
-      setConnection("Connected", "connected");
+      result = applySnapshot(JSON.parse(event.data));
     } catch (_) {
       setProtocolError("Malformed snapshot message.");
+      return;
     }
+    if (result === ApplyResult.Applied || result === ApplyResult.Ignored)
+      setConnection("Connected", "connected");
   });
   state.eventSource.addEventListener("update", event => {
+    let result = ApplyResult.Error;
     try {
-      applyUpdate(JSON.parse(event.data));
-      if (els.connection.className !== "status error" &&
-          els.connection.textContent !== "Resynchronizing")
-        setConnection("Connected", "connected");
+      result = applyUpdate(JSON.parse(event.data));
     } catch (_) {
       setProtocolError("Malformed update message.");
+      return;
     }
+    if (result === ApplyResult.Applied || result === ApplyResult.Ignored)
+      setConnection("Connected", "connected");
   });
   state.eventSource.addEventListener("error", () => {
+    if (state.connectionMode === "protocol-error" || state.connectionMode === "resynchronizing")
+      return;
     setConnection("Reconnecting", "reconnecting");
   });
 }

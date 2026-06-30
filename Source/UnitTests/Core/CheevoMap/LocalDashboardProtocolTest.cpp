@@ -569,6 +569,133 @@ TEST(CheevoMapV2LocalDashboardProtocol, NativeServerSendsNewSessionFullUpdate)
   CloseSocket(socket);
 }
 
+TEST(CheevoMapV2LocalDashboardProtocol,
+     NativeServerBroadcastsAuthoritativeSnapshotToExistingClients)
+{
+  Common::SocketContext socket_context;
+  LocalDashboardServer server;
+  ASSERT_TRUE(server.Start(TestOptions(), TestAssets(), TestSnapshot(1, 10), nullptr));
+
+  NativeSocket socket = ConnectToServer(server.GetBoundPort());
+  ASSERT_NE(socket, INVALID_NATIVE_SOCKET);
+  ASSERT_TRUE(SendAll(socket, "GET /api/v1/events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"));
+  ASSERT_NE(ReceiveUntilContains(socket, "\"sequence\":\"10\"").find("event: snapshot\n"),
+            std::string::npos);
+
+  server.PublishAuthoritativeSnapshot(TestSnapshot(2, 1));
+  const std::string response = ReceiveUntilContains(socket, "\"sequence\":\"1\"");
+  EXPECT_NE(response.find("event: snapshot\n"), std::string::npos) << response;
+  EXPECT_EQ(response.find("event: update\n"), std::string::npos) << response;
+  EXPECT_NE(response.find("\"session_id\":\"2\""), std::string::npos) << response;
+  EXPECT_NE(response.find("\"sequence\":\"1\""), std::string::npos) << response;
+
+  CloseSocket(socket);
+}
+
+TEST(CheevoMapV2LocalDashboardProtocol, NativeServerDiscardsPendingDeltasDuringAuthoritativeResync)
+{
+  Common::SocketContext socket_context;
+  LocalDashboardServer::Options options = TestOptions();
+  options.select_timeout_ms = 1000;
+  options.keepalive_interval_ms = 5000;
+
+  LocalDashboardServer server;
+  ASSERT_TRUE(server.Start(options, TestAssets(), TestSnapshot(1, 10), nullptr));
+
+  NativeSocket socket = ConnectToServer(server.GetBoundPort());
+  ASSERT_NE(socket, INVALID_NATIVE_SOCKET);
+  ASSERT_TRUE(SendAll(socket, "GET /api/v1/events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"));
+  ASSERT_NE(ReceiveUntilContains(socket, "\"sequence\":\"10\"").find("event: snapshot\n"),
+            std::string::npos);
+
+  server.PublishSnapshotAndUpdate(TestSnapshot(1, 11), TestUpdate(1, 11));
+  server.PublishSnapshotAndUpdate(TestSnapshot(1, 12), TestUpdate(1, 12));
+  server.PublishAuthoritativeSnapshot(TestSnapshot(2, 1));
+
+  std::string response = ReceiveUntilContains(socket, "\"sequence\":\"1\"");
+  EXPECT_EQ(CountSubstring(response, "event: snapshot\n"), 1u) << response;
+  EXPECT_EQ(response.find("event: update\n"), std::string::npos) << response;
+  EXPECT_NE(response.find("\"session_id\":\"2\""), std::string::npos) << response;
+  EXPECT_EQ(response.find("\"sequence\":\"11\""), std::string::npos) << response;
+  EXPECT_EQ(response.find("\"sequence\":\"12\""), std::string::npos) << response;
+
+  server.PublishSnapshotAndUpdate(TestSnapshot(2, 2), TestUpdate(2, 2));
+  response = ReceiveUntilContains(socket, "\"sequence\":\"2\"");
+  EXPECT_NE(response.find("event: update\n"), std::string::npos) << response;
+
+  CloseSocket(socket);
+}
+
+TEST(CheevoMapV2LocalDashboardProtocol, NativeServerRejectsOlderAuthoritativeSnapshot)
+{
+  Common::SocketContext socket_context;
+  LocalDashboardServer server;
+  ASSERT_TRUE(server.Start(TestOptions(), TestAssets(), TestSnapshot(2, 5), nullptr));
+
+  NativeSocket socket = ConnectToServer(server.GetBoundPort());
+  ASSERT_NE(socket, INVALID_NATIVE_SOCKET);
+  ASSERT_TRUE(SendAll(socket, "GET /api/v1/events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"));
+  ASSERT_NE(ReceiveUntilContains(socket, "\"sequence\":\"5\"").find("event: snapshot\n"),
+            std::string::npos);
+
+  server.PublishAuthoritativeSnapshot(TestSnapshot(1, 999));
+  std::string response = ReceiveFor(socket, std::chrono::milliseconds(250));
+  EXPECT_EQ(response.find("\"session_id\":\"1\""), std::string::npos) << response;
+  EXPECT_EQ(response.find("\"sequence\":\"999\""), std::string::npos) << response;
+
+  response = RequestFromServer(server.GetBoundPort(),
+                               "GET /api/v1/snapshot HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+  EXPECT_NE(response.find("\"session_id\":\"2\""), std::string::npos) << response;
+  EXPECT_NE(response.find("\"sequence\":\"5\""), std::string::npos) << response;
+  EXPECT_EQ(response.find("\"session_id\":\"1\""), std::string::npos) << response;
+  EXPECT_EQ(response.find("\"sequence\":\"999\""), std::string::npos) << response;
+
+  CloseSocket(socket);
+}
+
+TEST(CheevoMapV2LocalDashboardProtocol, NativeServerRebroadcastsEqualCursorAuthoritativeSnapshot)
+{
+  Common::SocketContext socket_context;
+  LocalDashboardServer server;
+  ASSERT_TRUE(server.Start(TestOptions(), TestAssets(), TestSnapshot(2, 5), nullptr));
+
+  NativeSocket socket = ConnectToServer(server.GetBoundPort());
+  ASSERT_NE(socket, INVALID_NATIVE_SOCKET);
+  ASSERT_TRUE(SendAll(socket, "GET /api/v1/events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"));
+  ASSERT_NE(ReceiveUntilContains(socket, "\"sequence\":\"5\"").find("event: snapshot\n"),
+            std::string::npos);
+
+  server.PublishAuthoritativeSnapshot(TestSnapshot(2, 5, R"(,"resync":"equal")"));
+  const std::string response = ReceiveUntilContains(socket, "\"resync\":\"equal\"");
+  EXPECT_NE(response.find("event: snapshot\n"), std::string::npos) << response;
+  EXPECT_EQ(response.find("event: update\n"), std::string::npos) << response;
+  EXPECT_NE(response.find("\"session_id\":\"2\""), std::string::npos) << response;
+  EXPECT_NE(response.find("\"sequence\":\"5\""), std::string::npos) << response;
+
+  CloseSocket(socket);
+}
+
+TEST(CheevoMapV2LocalDashboardProtocol, NativeServerSendsResynchronizedSnapshotToNewClients)
+{
+  Common::SocketContext socket_context;
+  LocalDashboardServer server;
+  ASSERT_TRUE(server.Start(TestOptions(), TestAssets(), TestSnapshot(1, 10), nullptr));
+
+  server.PublishAuthoritativeSnapshot(TestSnapshot(2, 1, R"(,"resync":"new-client")"));
+
+  NativeSocket socket = ConnectToServer(server.GetBoundPort());
+  ASSERT_NE(socket, INVALID_NATIVE_SOCKET);
+  ASSERT_TRUE(SendAll(socket, "GET /api/v1/events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"));
+
+  const std::string response = ReceiveUntilContains(socket, "\"resync\":\"new-client\"");
+  EXPECT_NE(response.find("event: snapshot\n"), std::string::npos) << response;
+  EXPECT_NE(response.find("\"session_id\":\"2\""), std::string::npos) << response;
+  EXPECT_NE(response.find("\"sequence\":\"1\""), std::string::npos) << response;
+  EXPECT_EQ(response.find("event: update\n"), std::string::npos) << response;
+
+  CloseSocket(socket);
+}
+
 TEST(CheevoMapV2LocalDashboardProtocol, NativeServerCountOverflowResynchronizesSseClients)
 {
   Common::SocketContext socket_context;

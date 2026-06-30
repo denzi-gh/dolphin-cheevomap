@@ -121,7 +121,7 @@ void CheevoMapV2LocalDashboard::OnStateUpdate(CheevoMap::V2::StateUpdate update)
   if (result == CheevoMap::V2::StateUpdateApplyResult::InvalidSessionTransition)
   {
     m_snapshot = CheevoMap::Manager::GetInstance().GetV2StateSnapshot();
-    m_server->PublishSnapshotAndUpdate(SerializeSnapshot(m_snapshot), std::nullopt);
+    m_server->PublishAuthoritativeSnapshot(SerializeSnapshot(m_snapshot));
     return;
   }
 

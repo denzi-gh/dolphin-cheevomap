@@ -57,6 +57,7 @@ public:
 
   void PublishSnapshotAndUpdate(SerializedSnapshot snapshot,
                                 std::optional<SerializedUpdate> update);
+  void PublishAuthoritativeSnapshot(SerializedSnapshot snapshot);
 
 private:
   struct Impl;
