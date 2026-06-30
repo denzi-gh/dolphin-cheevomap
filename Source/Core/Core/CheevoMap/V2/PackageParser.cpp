@@ -87,6 +87,380 @@ bool ParseLowerHexU64(std::string_view text, u64* out)
   return true;
 }
 
+bool IsCanonicalUnsignedDecimal(std::string_view text)
+{
+  if (text.empty())
+    return false;
+  if (text.size() > 1 && text.front() == '0')
+    return false;
+  for (const char c : text)
+  {
+    if (c < '0' || c > '9')
+      return false;
+  }
+  return true;
+}
+
+bool IsCanonicalSignedDecimal(std::string_view text)
+{
+  if (text.empty())
+    return false;
+
+  bool negative = false;
+  if (text.front() == '-')
+  {
+    negative = true;
+    text.remove_prefix(1);
+  }
+
+  if (text.empty())
+    return false;
+  if (text.size() > 1 && text.front() == '0')
+    return false;
+  if (negative && text == "0")
+    return false;
+
+  for (const char c : text)
+  {
+    if (c < '0' || c > '9')
+      return false;
+  }
+  return true;
+}
+
+bool ParseCanonicalU64(std::string_view text, u64* out)
+{
+  if (text.starts_with("0x"))
+  {
+    if (text.size() == 2)
+      return false;
+    for (const char c : text.substr(2))
+    {
+      if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+        return false;
+    }
+    return ParseLowerHexU64(text, out);
+  }
+
+  if (!IsCanonicalUnsignedDecimal(text))
+    return false;
+
+  const char* first = text.data();
+  const char* last = text.data() + text.size();
+  const auto [ptr, ec] = std::from_chars(first, last, *out, 10);
+  return ec == std::errc{} && ptr == last;
+}
+
+bool ParseCanonicalS64(std::string_view text, s64* out)
+{
+  if (!IsCanonicalSignedDecimal(text))
+    return false;
+
+  const char* first = text.data();
+  const char* last = text.data() + text.size();
+  const auto [ptr, ec] = std::from_chars(first, last, *out, 10);
+  return ec == std::errc{} && ptr == last;
+}
+
+std::optional<ExpressionOperator> ParseExpressionOperator(std::string_view text)
+{
+  if (text == "eq")
+    return ExpressionOperator::Equal;
+  if (text == "ne")
+    return ExpressionOperator::NotEqual;
+  if (text == "lt")
+    return ExpressionOperator::Less;
+  if (text == "lte")
+    return ExpressionOperator::LessEqual;
+  if (text == "gt")
+    return ExpressionOperator::Greater;
+  if (text == "gte")
+    return ExpressionOperator::GreaterEqual;
+  if (text == "not")
+    return ExpressionOperator::Not;
+  if (text == "and")
+    return ExpressionOperator::And;
+  if (text == "or")
+    return ExpressionOperator::Or;
+  if (text == "add")
+    return ExpressionOperator::Add;
+  if (text == "sub")
+    return ExpressionOperator::Subtract;
+  if (text == "mul")
+    return ExpressionOperator::Multiply;
+  if (text == "div")
+    return ExpressionOperator::Divide;
+  if (text == "mod")
+    return ExpressionOperator::Modulo;
+  if (text == "bit_and")
+    return ExpressionOperator::BitAnd;
+  if (text == "bit_or")
+    return ExpressionOperator::BitOr;
+  if (text == "bit_xor")
+    return ExpressionOperator::BitXor;
+  if (text == "bit_not")
+    return ExpressionOperator::BitNot;
+  if (text == "to_f64")
+    return ExpressionOperator::ToF64;
+  if (text == "if")
+    return ExpressionOperator::If;
+  return std::nullopt;
+}
+
+bool ValidateExpressionArgumentCount(ExpressionOperator op, size_t count, std::string_view op_text,
+                                     std::string* error)
+{
+  const auto exactly = [&](size_t expected) {
+    if (count == expected)
+      return true;
+    *error =
+        fmt::format("expression operator \"{}\" requires exactly {} arguments", op_text, expected);
+    return false;
+  };
+
+  switch (op)
+  {
+  case ExpressionOperator::Not:
+  case ExpressionOperator::BitNot:
+  case ExpressionOperator::ToF64:
+    return exactly(1);
+  case ExpressionOperator::And:
+  case ExpressionOperator::Or:
+    if (count >= 2 && count <= 16)
+      return true;
+    *error = fmt::format("expression operator \"{}\" requires 2..16 arguments", op_text);
+    return false;
+  case ExpressionOperator::If:
+    return exactly(3);
+  default:
+    return exactly(2);
+  }
+}
+
+bool ParseExpressionNode(const picojson::value& value, size_t depth, size_t* node_count,
+                         ExpressionNode* out, std::string* error);
+
+bool ParseExpressionConstant(const picojson::value& value, ExpressionConstant* out,
+                             std::string* error)
+{
+  if (!value.is<picojson::object>())
+  {
+    *error = "expression const must be an object";
+    return false;
+  }
+
+  const auto& object = value.get<picojson::object>();
+  if (!CheckAllowedFields(object, {"type", "value"}, "expression const", error))
+    return false;
+  if (object.size() != 2 || !object.contains("type") || !object.contains("value"))
+  {
+    *error = "expression const must contain exactly type and value";
+    return false;
+  }
+
+  const auto type = ReadStringFromJson(object, "type");
+  if (!type || type->empty())
+  {
+    *error = "expression const.type must be a non-empty string";
+    return false;
+  }
+
+  const picojson::value& constant_value = object.at("value");
+  if (*type == "bool")
+  {
+    if (!constant_value.is<bool>())
+    {
+      *error = "bool expression const.value must be a JSON Boolean";
+      return false;
+    }
+    out->type = ExpressionConstantType::Boolean;
+    out->value = constant_value.get<bool>();
+    return true;
+  }
+
+  if (*type == "u64")
+  {
+    if (!constant_value.is<std::string>())
+    {
+      *error = "u64 expression const.value must be a string";
+      return false;
+    }
+    u64 parsed = 0;
+    if (!ParseCanonicalU64(constant_value.get<std::string>(), &parsed))
+    {
+      *error = "u64 expression const.value must be canonical decimal or lowercase 0x hex";
+      return false;
+    }
+    out->type = ExpressionConstantType::UnsignedInteger;
+    out->value = parsed;
+    return true;
+  }
+
+  if (*type == "s64")
+  {
+    if (!constant_value.is<std::string>())
+    {
+      *error = "s64 expression const.value must be a string";
+      return false;
+    }
+    s64 parsed = 0;
+    if (!ParseCanonicalS64(constant_value.get<std::string>(), &parsed))
+    {
+      *error = "s64 expression const.value must be canonical decimal";
+      return false;
+    }
+    out->type = ExpressionConstantType::SignedInteger;
+    out->value = parsed;
+    return true;
+  }
+
+  if (*type == "f64")
+  {
+    if (!constant_value.is<double>() || !std::isfinite(constant_value.get<double>()))
+    {
+      *error = "f64 expression const.value must be a finite JSON number";
+      return false;
+    }
+    out->type = ExpressionConstantType::FloatingPoint;
+    out->value = constant_value.get<double>();
+    return true;
+  }
+
+  if (*type == "string")
+  {
+    if (!constant_value.is<std::string>())
+    {
+      *error = "string expression const.value must be a string";
+      return false;
+    }
+    out->type = ExpressionConstantType::String;
+    out->value = constant_value.get<std::string>();
+    return true;
+  }
+
+  *error = fmt::format("unsupported expression const.type \"{}\"", *type);
+  return false;
+}
+
+bool ParseExpressionNode(const picojson::value& value, size_t depth, size_t* node_count,
+                         ExpressionNode* out, std::string* error)
+{
+  if (depth > 32)
+  {
+    *error = "expression depth exceeds 32";
+    return false;
+  }
+  if (++*node_count > 256)
+  {
+    *error = "expression node count exceeds 256";
+    return false;
+  }
+  if (!value.is<picojson::object>())
+  {
+    *error = "expression node must be an object";
+    return false;
+  }
+
+  const auto& object = value.get<picojson::object>();
+  const bool has_ref = object.contains("ref");
+  const bool has_const = object.contains("const");
+  const bool has_op = object.contains("op");
+  const bool has_args = object.contains("args");
+
+  if (has_ref)
+  {
+    if (object.size() != 1)
+    {
+      *error = "expression reference node must contain exactly ref";
+      return false;
+    }
+    if (!object.at("ref").is<std::string>() || object.at("ref").get<std::string>().empty())
+    {
+      *error = "expression ref must be a non-empty string";
+      return false;
+    }
+    out->node = ExpressionReference{object.at("ref").get<std::string>()};
+    return true;
+  }
+
+  if (has_const)
+  {
+    if (object.size() != 1)
+    {
+      *error = "expression const node must contain exactly const";
+      return false;
+    }
+    ExpressionConstant constant;
+    if (!ParseExpressionConstant(object.at("const"), &constant, error))
+      return false;
+    out->node = std::move(constant);
+    return true;
+  }
+
+  if (has_op || has_args)
+  {
+    if (!has_op)
+    {
+      *error = "expression operation requires op";
+      return false;
+    }
+    if (!has_args)
+    {
+      *error = "expression operation requires args";
+      return false;
+    }
+    if (!CheckAllowedFields(object, {"op", "args"}, "expression operation", error))
+      return false;
+    if (!object.at("op").is<std::string>() || object.at("op").get<std::string>().empty())
+    {
+      *error = "expression op must be a non-empty string";
+      return false;
+    }
+    if (!object.at("args").is<picojson::array>())
+    {
+      *error = "expression args must be an array";
+      return false;
+    }
+
+    const std::string& op_text = object.at("op").get<std::string>();
+    const std::optional<ExpressionOperator> op = ParseExpressionOperator(op_text);
+    if (!op)
+    {
+      *error = fmt::format("unknown expression operator \"{}\"", op_text);
+      return false;
+    }
+
+    const auto& args = object.at("args").get<picojson::array>();
+    if (args.size() > 16)
+    {
+      *error = "expression operation has more than 16 arguments";
+      return false;
+    }
+    if (!ValidateExpressionArgumentCount(*op, args.size(), op_text, error))
+      return false;
+
+    ExpressionOperation operation;
+    operation.op = *op;
+    operation.arguments.reserve(args.size());
+    for (size_t i = 0; i < args.size(); ++i)
+    {
+      ExpressionNode argument;
+      if (!ParseExpressionNode(args[i], depth + 1, node_count, &argument, error))
+      {
+        *error = fmt::format("expression argument {}: {}", i, *error);
+        return false;
+      }
+      operation.arguments.push_back(std::move(argument));
+    }
+
+    out->node = std::move(operation);
+    return true;
+  }
+
+  *error = "expression node must contain exactly one of ref, const, or op/args";
+  return false;
+}
+
 bool ParseGame(const picojson::value& value, GameInfo* out, std::string* error)
 {
   if (!value.is<picojson::object>())
@@ -458,7 +832,7 @@ bool ParseValue(const picojson::value& value, size_t index, ValueDefinition* out
 
   const auto& object = value.get<picojson::object>();
   const std::string context = fmt::format("values[{}]", index);
-  if (!CheckAllowedFields(object, {"id", "type", "bytes", "read"}, context, error))
+  if (!CheckAllowedFields(object, {"id", "type", "bytes", "read", "expression"}, context, error))
     return false;
 
   const auto id = ReadStringFromJson(object, "id");
@@ -484,7 +858,15 @@ bool ParseValue(const picojson::value& value, size_t index, ValueDefinition* out
   }
   out->type = *type;
 
-  if (out->type == ValueType::String)
+  const bool has_read = object.contains("read");
+  const bool has_expression = object.contains("expression");
+  if (has_read == has_expression)
+  {
+    *error = fmt::format("value \"{}\" must contain exactly one of read or expression", out->id);
+    return false;
+  }
+
+  if (out->type == ValueType::String && has_read)
   {
     const auto bytes_it = object.find("bytes");
     u32 bytes = 0;
@@ -500,23 +882,41 @@ bool ParseValue(const picojson::value& value, size_t index, ValueDefinition* out
     }
     out->bytes = bytes;
   }
+  else if (out->type == ValueType::String && has_expression)
+  {
+    if (object.contains("bytes"))
+    {
+      *error = fmt::format("value \"{}\" bytes is invalid for expression values", out->id);
+      return false;
+    }
+    out->bytes = 0;
+  }
   else if (object.contains("bytes"))
   {
     *error = fmt::format("value \"{}\" bytes is only valid for string", out->id);
     return false;
   }
 
-  const auto read_it = object.find("read");
-  if (read_it == object.end())
+  if (has_read)
   {
-    *error = fmt::format("value \"{}\" requires read", out->id);
+    ReadValueSource source;
+    if (!ParseRead(object.at("read"), out->type, &source.read, error))
+    {
+      *error = fmt::format("value \"{}\".{}", out->id, *error);
+      return false;
+    }
+    out->source = std::move(source);
+    return true;
+  }
+
+  ExpressionValueSource source;
+  size_t node_count = 0;
+  if (!ParseExpressionNode(object.at("expression"), 1, &node_count, &source.expression, error))
+  {
+    *error = fmt::format("value \"{}\".expression: {}", out->id, *error);
     return false;
   }
-  if (!ParseRead(read_it->second, out->type, &out->read, error))
-  {
-    *error = fmt::format("value \"{}\".{}", out->id, *error);
-    return false;
-  }
+  out->source = std::move(source);
 
   return true;
 }

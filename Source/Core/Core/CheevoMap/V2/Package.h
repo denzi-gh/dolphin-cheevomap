@@ -65,12 +65,81 @@ struct PointerChainRead
 
 using MemoryReadDefinition = std::variant<DirectMemoryRead, PointerChainRead>;
 
+enum class ExpressionOperator : u8
+{
+  Equal,
+  NotEqual,
+  Less,
+  LessEqual,
+  Greater,
+  GreaterEqual,
+  Not,
+  And,
+  Or,
+  Add,
+  Subtract,
+  Multiply,
+  Divide,
+  Modulo,
+  BitAnd,
+  BitOr,
+  BitXor,
+  BitNot,
+  ToF64,
+  If,
+};
+
+enum class ExpressionConstantType : u8
+{
+  Boolean,
+  SignedInteger,
+  UnsignedInteger,
+  FloatingPoint,
+  String,
+};
+
+struct ExpressionReference
+{
+  std::string value_id;
+};
+
+struct ExpressionConstant
+{
+  ExpressionConstantType type = ExpressionConstantType::UnsignedInteger;
+  std::variant<bool, s64, u64, double, std::string> value = u64{};
+};
+
+struct ExpressionNode;
+
+struct ExpressionOperation
+{
+  ExpressionOperator op = ExpressionOperator::Equal;
+  std::vector<ExpressionNode> arguments;
+};
+
+struct ExpressionNode
+{
+  std::variant<ExpressionReference, ExpressionConstant, ExpressionOperation> node;
+};
+
+struct ReadValueSource
+{
+  MemoryReadDefinition read;
+};
+
+struct ExpressionValueSource
+{
+  ExpressionNode expression;
+};
+
+using ValueSourceDefinition = std::variant<ReadValueSource, ExpressionValueSource>;
+
 struct ValueDefinition
 {
   std::string id;
   ValueType type = ValueType::U8;
   u32 bytes = 0;
-  MemoryReadDefinition read;
+  ValueSourceDefinition source;
 };
 
 struct GameInfo
@@ -99,6 +168,11 @@ const char* ValueTypeName(ValueType type);
 const char* PointerTypeName(PointerType type);
 u32 GetPointerReadSize(PointerType type);
 u32 GetValueReadSize(const ValueDefinition& value);
+bool IsReadBackedValue(const ValueDefinition& value);
+bool IsExpressionBackedValue(const ValueDefinition& value);
+const MemoryReadDefinition* GetReadDefinition(const ValueDefinition& value);
+MemoryReadDefinition* GetMutableReadDefinition(ValueDefinition& value);
+const ExpressionNode* GetExpressionDefinition(const ValueDefinition& value);
 bool ValueTypeRequiresEndian(ValueType type);
 bool ValueTypeAllowsEndian(ValueType type);
 bool IsSignedIntegerType(ValueType type);

@@ -215,6 +215,10 @@ std::optional<ReadPlan> BuildReadPlan(const Package& package,
 
   for (const ValueDefinition& value : package.values)
   {
+    const MemoryReadDefinition* read = GetReadDefinition(value);
+    if (read == nullptr)
+      continue;
+
     const u32 size = GetValueReadSize(value);
     if (size == 0)
     {
@@ -222,7 +226,7 @@ std::optional<ReadPlan> BuildReadPlan(const Package& package,
       return std::nullopt;
     }
 
-    if (const auto* direct = std::get_if<DirectMemoryRead>(&value.read))
+    if (const auto* direct = std::get_if<DirectMemoryRead>(read))
     {
       const auto area_it = areas.find(direct->area_id);
       if (area_it == areas.end())
@@ -252,7 +256,7 @@ std::optional<ReadPlan> BuildReadPlan(const Package& package,
       continue;
     }
 
-    const auto* chain = std::get_if<PointerChainRead>(&value.read);
+    const auto* chain = std::get_if<PointerChainRead>(read);
     if (chain == nullptr)
     {
       *error_out = fmt::format("value \"{}\" has unsupported read definition", value.id);
@@ -355,7 +359,7 @@ std::optional<ReadPlan> BuildReadPlan(const Package& package,
   for (const PendingDirectRead& pending : direct_reads)
   {
     const auto& value = *pending.value;
-    const auto& direct = std::get<DirectMemoryRead>(value.read);
+    const auto& direct = std::get<DirectMemoryRead>(*GetReadDefinition(value));
     plan.values.push_back(PlannedValueRead{value.id,
                                            initial_batch.request_indices[pending.key_index],
                                            value.type, direct.endian, GetValueReadSize(value)});
@@ -382,8 +386,27 @@ std::optional<ReadPlan> BuildReadPlan(const Package& package,
   return plan;
 }
 
+std::optional<EvaluationPlan> BuildEvaluationPlan(const Package& package,
+                                                  const std::vector<MemoryArea>& memory_areas,
+                                                  std::string* error_out)
+{
+  std::optional<ReadPlan> read_plan = BuildReadPlan(package, memory_areas, error_out);
+  if (!read_plan)
+    return std::nullopt;
+
+  std::optional<std::vector<PlannedExpression>> expressions =
+      BuildExpressionPlan(package, error_out);
+  if (!expressions)
+    return std::nullopt;
+
+  return EvaluationPlan{std::move(*read_plan), std::move(*expressions)};
+}
+
 StateValueMap EvaluateReadPlan(const ReadPlan& plan, const EmulatorDataSource& data_source)
 {
+  if (plan.requests.empty() && plan.pointer_chains.empty())
+    return DecodeReadResults(plan, {});
+
   const std::vector<MemoryReadResult> initial_results = data_source.ReadMemory(plan.requests);
   const std::map<ReadKey, size_t> initial_request_indices = MakeRequestIndex(plan.requests);
   StateValueMap values = DecodeReadResults(plan, initial_results);

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "Core/CheevoMap/V2/EmulatorDataSource.h"
+#include "Core/CheevoMap/V2/ExpressionEvaluator.h"
 #include "Core/CheevoMap/V2/Package.h"
 #include "Core/CheevoMap/V2/StateStore.h"
 
@@ -49,9 +50,18 @@ struct ReadPlan
   std::vector<PlannedPointerChainRead> pointer_chains;
 };
 
+struct EvaluationPlan
+{
+  ReadPlan read_plan;
+  std::vector<PlannedExpression> expressions_in_evaluation_order;
+};
+
 std::optional<ReadPlan> BuildReadPlan(const Package& package,
                                       const std::vector<MemoryArea>& memory_areas,
                                       std::string* error_out);
+std::optional<EvaluationPlan> BuildEvaluationPlan(const Package& package,
+                                                  const std::vector<MemoryArea>& memory_areas,
+                                                  std::string* error_out);
 StateValueMap EvaluateReadPlan(const ReadPlan& plan, const EmulatorDataSource& data_source);
 StateValueMap DecodeReadResults(const ReadPlan& plan, const std::vector<MemoryReadResult>& results);
 }  // namespace CheevoMap::V2

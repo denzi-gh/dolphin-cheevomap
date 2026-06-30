@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -31,16 +32,28 @@ namespace
 {
 using CheevoMap::Manager;
 using CheevoMap::Dolphin::ResolveDolphinPointerAddress;
+using CheevoMap::V2::BuildEvaluationPlan;
 using CheevoMap::V2::BuildReadPlan;
+using CheevoMap::V2::ConvertExpressionResultToDeclaredType;
 using CheevoMap::V2::DecodeReadResults;
 using CheevoMap::V2::DirectMemoryRead;
 using CheevoMap::V2::EmulatorDataSource;
 using CheevoMap::V2::EmulatorStatus;
 using CheevoMap::V2::Endian;
+using CheevoMap::V2::EvaluateExpression;
 using CheevoMap::V2::EvaluatePackage;
 using CheevoMap::V2::EvaluatePackageForSession;
+using CheevoMap::V2::ExpressionConstant;
+using CheevoMap::V2::ExpressionConstantType;
+using CheevoMap::V2::ExpressionNode;
+using CheevoMap::V2::ExpressionOperation;
+using CheevoMap::V2::ExpressionOperator;
+using CheevoMap::V2::ExpressionReference;
+using CheevoMap::V2::ExpressionValueSource;
 using CheevoMap::V2::GameIdentity;
 using CheevoMap::V2::GameInfo;
+using CheevoMap::V2::GetMutableReadDefinition;
+using CheevoMap::V2::GetReadDefinition;
 using CheevoMap::V2::MemoryArea;
 using CheevoMap::V2::MemoryReadError;
 using CheevoMap::V2::MemoryReadRequest;
@@ -52,10 +65,12 @@ using CheevoMap::V2::PointerAddressResolution;
 using CheevoMap::V2::PointerChainRead;
 using CheevoMap::V2::PointerType;
 using CheevoMap::V2::ReadPlan;
+using CheevoMap::V2::ReadValueSource;
 using CheevoMap::V2::StateApplyStatus;
 using CheevoMap::V2::StateStore;
 using CheevoMap::V2::StateUpdate;
 using CheevoMap::V2::StateValue;
+using CheevoMap::V2::StateValueMap;
 using CheevoMap::V2::ValidatePackageGameIdentity;
 using CheevoMap::V2::ValueDefinition;
 using CheevoMap::V2::ValueType;
@@ -194,7 +209,7 @@ std::optional<Package> ParseText(const std::string& json, std::string* error)
 void SetDirectRead(ValueDefinition* value, std::string area_id, u64 address,
                    Endian endian = Endian::None)
 {
-  value->read = DirectMemoryRead{std::move(area_id), address, endian};
+  value->source = ReadValueSource{DirectMemoryRead{std::move(area_id), address, endian}};
 }
 
 ValueDefinition DirectValue(std::string id, ValueType type, std::string area_id, u64 address,
@@ -205,6 +220,60 @@ ValueDefinition DirectValue(std::string id, ValueType type, std::string area_id,
   value.type = type;
   value.bytes = bytes;
   SetDirectRead(&value, std::move(area_id), address, endian);
+  return value;
+}
+
+ExpressionNode Ref(std::string id)
+{
+  return ExpressionNode{ExpressionReference{std::move(id)}};
+}
+
+ExpressionNode BoolConst(bool value)
+{
+  return ExpressionNode{
+      ExpressionConstant{ExpressionConstantType::Boolean, value},
+  };
+}
+
+ExpressionNode S64Const(s64 value)
+{
+  return ExpressionNode{
+      ExpressionConstant{ExpressionConstantType::SignedInteger, value},
+  };
+}
+
+ExpressionNode U64Const(u64 value)
+{
+  return ExpressionNode{
+      ExpressionConstant{ExpressionConstantType::UnsignedInteger, value},
+  };
+}
+
+ExpressionNode F64Const(double value)
+{
+  return ExpressionNode{
+      ExpressionConstant{ExpressionConstantType::FloatingPoint, value},
+  };
+}
+
+ExpressionNode StringConst(std::string value)
+{
+  return ExpressionNode{
+      ExpressionConstant{ExpressionConstantType::String, std::move(value)},
+  };
+}
+
+ExpressionNode Op(ExpressionOperator op, std::vector<ExpressionNode> arguments)
+{
+  return ExpressionNode{ExpressionOperation{op, std::move(arguments)}};
+}
+
+ValueDefinition ExpressionValue(std::string id, ValueType type, ExpressionNode expression)
+{
+  ValueDefinition value;
+  value.id = std::move(id);
+  value.type = type;
+  value.source = ExpressionValueSource{std::move(expression)};
   return value;
 }
 
@@ -220,7 +289,7 @@ void SetPointerChainRead(ValueDefinition* value, std::string base_area_id, u64 b
   read.pointer_type = PointerType::U32;
   read.pointer_endian = pointer_endian;
   read.endian = final_endian;
-  value->read = std::move(read);
+  value->source = ReadValueSource{std::move(read)};
 }
 
 void SetPointerChainRead(ValueDefinition* value, std::string base_area_id, u64 base_address,
@@ -507,6 +576,173 @@ TEST(CheevoMapV2Parser, AcceptsMaximumStringLength)
   EXPECT_EQ(package->values[0].bytes, 256u);
 }
 
+TEST(CheevoMapV2Parser, ParsesValueSourceSelection)
+{
+  std::string error;
+  EXPECT_TRUE(ParseText(
+      PackageJson(
+          R"({"id":"score","type":"u32","read":{"area":"mem1","address":"0x10","endian":"big"}})"),
+      &error))
+      << error;
+  EXPECT_TRUE(ParseText(PackageJson(PointerValueJson("u32", "")), &error)) << error;
+  EXPECT_TRUE(ParseText(
+      PackageJson(
+          R"({"id":"has_score","type":"bool","expression":{"op":"gt","args":[{"const":{"type":"u64","value":"1"}},{"const":{"type":"u64","value":"0"}}]}})"),
+      &error))
+      << error;
+
+  const std::vector<std::pair<std::string, std::string>> invalid = {
+      {R"({"id":"bad","type":"u8","read":{"area":"mem1","address":"0x0"},"expression":{"const":{"type":"u64","value":"1"}}})",
+       "exactly one"},
+      {R"({"id":"bad","type":"u8"})", "exactly one"},
+      {R"({"id":"bad","type":"string","bytes":8,"expression":{"const":{"type":"string","value":"ok"}}})",
+       "bytes is invalid"},
+      {R"({"id":"bad","type":"string","read":{"area":"mem1","address":"0x0"}})", "bytes"},
+  };
+  for (const auto& [value_json, expected_error] : invalid)
+  {
+    EXPECT_FALSE(ParseText(PackageJson(value_json), &error)) << value_json;
+    EXPECT_NE(error.find(expected_error), std::string::npos) << error;
+  }
+}
+
+TEST(CheevoMapV2Parser, ParsesExpressionReferencesAndConstantsStrictly)
+{
+  std::string error;
+  const std::vector<std::string> valid_constants = {
+      R"({"const":{"type":"bool","value":true}})",
+      R"({"const":{"type":"s64","value":"-9223372036854775808"}})",
+      R"({"const":{"type":"s64","value":"9223372036854775807"}})",
+      R"({"const":{"type":"u64","value":"0"}})",
+      R"({"const":{"type":"u64","value":"18446744073709551615"}})",
+      R"({"const":{"type":"u64","value":"0x0b000002"}})",
+      R"({"const":{"type":"f64","value":1.5}})",
+      R"({"const":{"type":"string","value":"Game"}})",
+  };
+  for (const std::string& expression_json : valid_constants)
+  {
+    const std::string type = expression_json.find("bool") != std::string::npos   ? "bool" :
+                             expression_json.find("s64") != std::string::npos    ? "s64" :
+                             expression_json.find("f64") != std::string::npos    ? "f64" :
+                             expression_json.find("string") != std::string::npos ? "string" :
+                                                                                   "u64";
+    EXPECT_TRUE(ParseText(
+        PackageJson(R"({"id":"v","type":")" + type + R"(","expression":)" + expression_json + "}"),
+        &error))
+        << error;
+  }
+
+  EXPECT_TRUE(ParseText(
+      PackageJson(
+          R"({"id":"raw","type":"u8","read":{"area":"mem1","address":"0x0"}},{"id":"copy","type":"u8","expression":{"ref":"raw"}})"),
+      &error))
+      << error;
+
+  const std::vector<std::pair<std::string, std::string>> invalid = {
+      {R"({"ref":""})", "non-empty"},
+      {R"({"ref":7})", "non-empty"},
+      {R"({"ref":"a","extra":true})", "exactly ref"},
+      {R"({"ref":"a","const":{"type":"u64","value":"1"}})", "exactly ref"},
+      {R"({"ref":"a","op":"not"})", "exactly ref"},
+      {R"({"const":{"type":"s64","value":"01"}})", "canonical"},
+      {R"({"const":{"type":"u64","value":"1.0"}})", "canonical"},
+      {R"({"const":{"type":"u64","value":"18446744073709551616"}})", "canonical"},
+      {R"({"const":{"type":"u64","value":"-1"}})", "canonical"},
+      {R"({"const":{"type":"u64","value":"0X1"}})", "canonical"},
+      {R"({"const":{"type":"bool","value":"true"}})", "Boolean"},
+      {R"({"const":{"type":"s64","value":1}})", "string"},
+      {R"({"const":{"type":"u64","value":1}})", "string"},
+      {R"({"const":{"type":"f64","value":"1.0"}})", "finite"},
+      {R"({"const":{"type":"string","value":1}})", "string"},
+      {R"({"const":{"type":"u64","value":"1","extra":true}})", "unknown field"},
+      {R"({"const":{"type":"u32","value":"1"}})", "unsupported"},
+  };
+  for (const auto& [expression_json, expected_error] : invalid)
+  {
+    EXPECT_FALSE(ParseText(
+        PackageJson(R"({"id":"v","type":"u64","expression":)" + expression_json + "}"), &error))
+        << expression_json;
+    EXPECT_NE(error.find(expected_error), std::string::npos) << error;
+  }
+
+  picojson::object non_finite;
+  non_finite["id"] = picojson::value("v");
+  non_finite["type"] = picojson::value("f64");
+  non_finite["expression"] = picojson::value(picojson::object{
+      {"const", picojson::value(picojson::object{
+                    {"type", picojson::value("f64")},
+                    {"value", NonFiniteNumber(std::numeric_limits<double>::infinity())}})}});
+  EXPECT_FALSE(ParsePackage(MinimalRootWithValue(picojson::value(non_finite)), &error));
+  EXPECT_NE(error.find("finite"), std::string::npos) << error;
+}
+
+TEST(CheevoMapV2Parser, ParsesExpressionOperationsAndLimitsStrictly)
+{
+  std::string error;
+  EXPECT_TRUE(ParseText(
+      PackageJson(
+          R"({"id":"v","type":"bool","expression":{"op":"and","args":[{"const":{"type":"bool","value":true}},{"op":"not","args":[{"const":{"type":"bool","value":false}}]}]}})"),
+      &error))
+      << error;
+
+  const std::vector<std::pair<std::string, std::string>> invalid = {
+      {R"({"op":"unknown","args":[]})", "unknown"},
+      {R"({"args":[]})", "requires op"},
+      {R"({"op":"not"})", "requires args"},
+      {R"({"op":"not","args":true})", "array"},
+      {R"({"op":"not","args":[],"extra":true})", "unknown field"},
+      {R"({"op":"not","args":[]})", "exactly 1"},
+      {R"({"op":"eq","args":[{"const":{"type":"u64","value":"1"}}]})", "exactly 2"},
+      {R"({"op":"if","args":[{"const":{"type":"bool","value":true}}]})", "exactly 3"},
+      {R"({"op":"and","args":[{"const":{"type":"bool","value":true}}]})", "2..16"},
+  };
+  for (const auto& [expression_json, expected_error] : invalid)
+  {
+    EXPECT_FALSE(ParseText(
+        PackageJson(R"({"id":"v","type":"bool","expression":)" + expression_json + "}"), &error))
+        << expression_json;
+    EXPECT_NE(error.find(expected_error), std::string::npos) << error;
+  }
+
+  std::string too_many_args = R"({"op":"and","args":[)";
+  for (int i = 0; i < 17; ++i)
+  {
+    if (i != 0)
+      too_many_args += ",";
+    too_many_args += R"({"const":{"type":"bool","value":true}})";
+  }
+  too_many_args += "]}";
+  EXPECT_FALSE(ParseText(
+      PackageJson(R"({"id":"v","type":"bool","expression":)" + too_many_args + "}"), &error));
+  EXPECT_NE(error.find("more than 16"), std::string::npos) << error;
+
+  std::string deep = R"({"const":{"type":"bool","value":true}})";
+  for (int i = 0; i < 32; ++i)
+    deep = R"({"op":"not","args":[)" + deep + "]}";
+  EXPECT_FALSE(
+      ParseText(PackageJson(R"({"id":"v","type":"bool","expression":)" + deep + "}"), &error));
+  EXPECT_NE(error.find("depth"), std::string::npos) << error;
+
+  std::string many_nodes = R"({"op":"and","args":[)";
+  for (int i = 0; i < 16; ++i)
+  {
+    if (i != 0)
+      many_nodes += ",";
+    many_nodes += R"({"op":"and","args":[)";
+    for (int j = 0; j < 16; ++j)
+    {
+      if (j != 0)
+        many_nodes += ",";
+      many_nodes += R"({"const":{"type":"bool","value":true}})";
+    }
+    many_nodes += "]}";
+  }
+  many_nodes += "]}";
+  EXPECT_FALSE(ParseText(PackageJson(R"({"id":"v","type":"bool","expression":)" + many_nodes + "}"),
+                         &error));
+  EXPECT_NE(error.find("node count"), std::string::npos) << error;
+}
+
 TEST(CheevoMapV2Parser, AcceptsPointerChainPackages)
 {
   const std::vector<std::string> values = {
@@ -566,14 +802,15 @@ TEST(CheevoMapV2Parser, AcceptsPointerChainPackages)
       &error);
   ASSERT_TRUE(mixed) << error;
   ASSERT_EQ(mixed->values.size(), 2u);
-  const auto& chain = std::get<PointerChainRead>(mixed->values[1].read);
+  const auto& chain = std::get<PointerChainRead>(*GetReadDefinition(mixed->values[1]));
   EXPECT_EQ(chain.target_area_ids, (std::vector<std::string>{"mem1", "mem1", "mem2"}));
   EXPECT_EQ(chain.pointer_endian, Endian::Little);
   EXPECT_EQ(chain.endian, Endian::Big);
 
   const auto shorthand = ParseText(PackageJson(PointerValueJson("u32", "")), &error);
   ASSERT_TRUE(shorthand) << error;
-  const auto& shorthand_chain = std::get<PointerChainRead>(shorthand->values[0].read);
+  const auto& shorthand_chain =
+      std::get<PointerChainRead>(*GetReadDefinition(shorthand->values[0]));
   EXPECT_EQ(shorthand_chain.target_area_ids, (std::vector<std::string>{"mem2", "mem2", "mem2"}));
 }
 
@@ -872,7 +1109,7 @@ TEST(CheevoMapV2Planner, BuildsDeterministicGroupedRequestsAndMappings)
 TEST(CheevoMapV2Planner, RejectsInvalidPlansBeforeMemoryAccess)
 {
   Package package = ValidPackage();
-  std::get<DirectMemoryRead>(package.values.front().read).area_id = "missing";
+  std::get<DirectMemoryRead>(*GetMutableReadDefinition(package.values.front())).area_id = "missing";
 
   FakeDataSource data_source;
   std::string error;
@@ -881,7 +1118,7 @@ TEST(CheevoMapV2Planner, RejectsInvalidPlansBeforeMemoryAccess)
   EXPECT_EQ(data_source.grouped_read_count, 0);
 
   package = ValidPackage();
-  std::get<DirectMemoryRead>(package.values.front().read).address = 0x1000;
+  std::get<DirectMemoryRead>(*GetMutableReadDefinition(package.values.front())).address = 0x1000;
   EXPECT_FALSE(EvaluatePackage(package, data_source, &error));
   EXPECT_NE(error.find("outside memory area"), std::string::npos);
   EXPECT_EQ(data_source.grouped_read_count, 0);
@@ -938,7 +1175,7 @@ TEST(CheevoMapV2Planner, RejectsInvalidPointerTargetAreaStagesBeforeMemoryAccess
   };
 
   ValueDefinition first = PointerValue("first", ValueType::U8, {0x0}, Endian::Big, Endian::None);
-  std::get<PointerChainRead>(first.read).target_area_ids = {"missing"};
+  std::get<PointerChainRead>(*GetMutableReadDefinition(first)).target_area_ids = {"missing"};
   expect_failed_plan(first, FakeDataSource().GetMemoryAreas(), "unknown pointer_chain.target_area");
 
   ValueDefinition intermediate;
@@ -959,12 +1196,12 @@ TEST(CheevoMapV2Planner, RejectsInvalidPointerTargetAreaStagesBeforeMemoryAccess
 
   ValueDefinition mismatch =
       PointerValue("mismatch", ValueType::U8, {0x0}, Endian::Big, Endian::None);
-  std::get<PointerChainRead>(mismatch.read).target_area_ids.clear();
+  std::get<PointerChainRead>(*GetMutableReadDefinition(mismatch)).target_area_ids.clear();
   expect_failed_plan(mismatch, FakeDataSource().GetMemoryAreas(), "exactly one entry per offset");
 
   ValueDefinition overflow =
       PointerValue("overflow", ValueType::U8, {0x0}, Endian::Big, Endian::None);
-  std::get<PointerChainRead>(overflow.read).target_area_ids = {"mem2"};
+  std::get<PointerChainRead>(*GetMutableReadDefinition(overflow)).target_area_ids = {"mem2"};
   std::vector<MemoryArea> overflow_areas = FakeDataSource().GetMemoryAreas();
   overflow_areas[1].base_address = std::numeric_limits<u64>::max();
   overflow_areas[1].size = 1;
@@ -983,6 +1220,110 @@ TEST(CheevoMapV2Planner, DirectOnlyPlanRemainsUnchanged)
   EXPECT_EQ(plan->requests[0].address, 0x10u);
   EXPECT_EQ(plan->requests[0].size, 2u);
   EXPECT_TRUE(plan->pointer_chains.empty());
+}
+
+TEST(CheevoMapV2ExpressionPlanner, ResolvesForwardReferencesAndOrdersTopologically)
+{
+  Package package;
+  package.game.id = "GAME01";
+  package.metadata.title = "Test";
+  package.values.push_back(ExpressionValue("later_copy", ValueType::U32, Ref("later_read")));
+  package.values.push_back(ExpressionValue(
+      "third", ValueType::U32, Op(ExpressionOperator::Add, {Ref("second"), U64Const(1)})));
+  package.values.push_back(DirectValue("later_read", ValueType::U32, "mem1", 0x20, Endian::Big));
+  package.values.push_back(
+      ExpressionValue("second", ValueType::U32,
+                      Op(ExpressionOperator::Add, {Ref("later_copy"), Ref("later_copy")})));
+  package.values.push_back(ExpressionValue("independent", ValueType::Boolean, BoolConst(true)));
+
+  std::string error;
+  const auto plan = BuildEvaluationPlan(package, FakeDataSource().GetMemoryAreas(), &error);
+  ASSERT_TRUE(plan) << error;
+  ASSERT_EQ(plan->expressions_in_evaluation_order.size(), 4u);
+  EXPECT_EQ(plan->expressions_in_evaluation_order[0].value_id, "later_copy");
+  EXPECT_EQ(plan->expressions_in_evaluation_order[1].value_id, "second");
+  EXPECT_EQ(plan->expressions_in_evaluation_order[2].value_id, "third");
+  EXPECT_EQ(plan->expressions_in_evaluation_order[3].value_id, "independent");
+  ASSERT_EQ(plan->expressions_in_evaluation_order[1].dependencies.size(), 1u);
+  EXPECT_EQ(plan->expressions_in_evaluation_order[1].dependencies[0], "later_copy");
+  ASSERT_EQ(plan->read_plan.requests.size(), 1u);
+}
+
+TEST(CheevoMapV2ExpressionPlanner, RejectsUnknownReferencesAndCyclesBeforeReads)
+{
+  auto expect_failure = [](Package package, std::string_view expected_error) {
+    FakeDataSource data_source;
+    std::string error;
+    EXPECT_FALSE(EvaluatePackage(package, data_source, &error));
+    EXPECT_NE(error.find(expected_error), std::string::npos) << error;
+    EXPECT_EQ(data_source.grouped_read_count, 0);
+    EXPECT_EQ(data_source.single_read_count, 0);
+  };
+
+  Package unknown = ValidPackage();
+  unknown.values.push_back(ExpressionValue("derived", ValueType::U32, Ref("scroe")));
+  expect_failure(std::move(unknown), R"(value "derived" references unknown value "scroe")");
+
+  Package self;
+  self.game.id = "GAME01";
+  self.metadata.title = "Test";
+  self.values.push_back(ExpressionValue("a", ValueType::U32, Ref("a")));
+  expect_failure(std::move(self), "expression dependency cycle: a -> a");
+
+  Package two;
+  two.game.id = "GAME01";
+  two.metadata.title = "Test";
+  two.values.push_back(ExpressionValue("a", ValueType::U32, Ref("b")));
+  two.values.push_back(ExpressionValue("b", ValueType::U32, Ref("a")));
+  expect_failure(std::move(two), "expression dependency cycle: a -> b -> a");
+
+  Package three;
+  three.game.id = "GAME01";
+  three.metadata.title = "Test";
+  three.values.push_back(ExpressionValue("a", ValueType::U32, Ref("b")));
+  three.values.push_back(ExpressionValue("b", ValueType::U32, Ref("c")));
+  three.values.push_back(ExpressionValue("c", ValueType::U32, Ref("a")));
+  expect_failure(std::move(three), "expression dependency cycle: a -> b -> c -> a");
+}
+
+TEST(CheevoMapV2ExpressionPlanner, RejectsStaticTypeErrorsBeforeReads)
+{
+  auto expect_type_error = [](ExpressionNode expression, ValueType output_type,
+                              std::string_view expected_error) {
+    Package package = ValidPackage();
+    package.values.push_back(ExpressionValue("derived", output_type, std::move(expression)));
+
+    FakeDataSource data_source;
+    std::string error;
+    EXPECT_FALSE(EvaluatePackage(package, data_source, &error));
+    EXPECT_NE(error.find(expected_error), std::string::npos) << error;
+    EXPECT_EQ(data_source.grouped_read_count, 0);
+  };
+
+  expect_type_error(BoolConst(true), ValueType::U32, "does not match");
+  expect_type_error(Op(ExpressionOperator::Equal, {U64Const(1), S64Const(1)}), ValueType::Boolean,
+                    "matching categories");
+  expect_type_error(Op(ExpressionOperator::Add, {U64Const(1), F64Const(1.0)}), ValueType::U64,
+                    "matching numeric");
+  expect_type_error(Op(ExpressionOperator::Add, {StringConst("a"), StringConst("b")}),
+                    ValueType::String, "numeric");
+  expect_type_error(Op(ExpressionOperator::Add, {BoolConst(true), BoolConst(false)}),
+                    ValueType::Boolean, "numeric");
+  expect_type_error(Op(ExpressionOperator::BitAnd, {S64Const(1), S64Const(1)}), ValueType::U64,
+                    "UnsignedInteger");
+  expect_type_error(Op(ExpressionOperator::Less, {StringConst("a"), StringConst("b")}),
+                    ValueType::Boolean, "numeric");
+  expect_type_error(Op(ExpressionOperator::If, {BoolConst(true), U64Const(1), S64Const(1)}),
+                    ValueType::U64, "branch");
+
+  Package package;
+  package.game.id = "GAME01";
+  package.metadata.title = "Test";
+  package.values.push_back(ExpressionValue(
+      "valid", ValueType::F64,
+      Op(ExpressionOperator::ToF64, {Op(ExpressionOperator::Add, {U64Const(2), U64Const(3)})})));
+  std::string error;
+  EXPECT_TRUE(BuildEvaluationPlan(package, FakeDataSource().GetMemoryAreas(), &error)) << error;
 }
 
 TEST(CheevoMapV2Decoder, DecodesIntegerTypeMatrix)
@@ -1116,12 +1457,161 @@ TEST(CheevoMapV2Decoder, DecodesPrimitiveTypesEndianAndStrings)
   EXPECT_EQ(data_source.single_read_count, 0);
 }
 
+TEST(CheevoMapV2ExpressionEvaluator, EvaluatesComparisonsLogicBitwiseConversionAndIf)
+{
+  StateValueMap values{{"u", StateValue::UnsignedInteger(5)},
+                       {"s", StateValue::SignedInteger(-2)},
+                       {"f", StateValue::FloatingPoint(1.5)},
+                       {"text", StateValue::String("Game")},
+                       {"missing", StateValue::Unavailable()}};
+  const auto eval = [&values](ExpressionNode node) { return EvaluateExpression(node, values); };
+
+  StateValue result = eval(Op(ExpressionOperator::Equal, {U64Const(5), Ref("u")}));
+  EXPECT_TRUE(*result.AsBoolean());
+  result = eval(Op(ExpressionOperator::NotEqual, {S64Const(-1), Ref("s")}));
+  EXPECT_TRUE(*result.AsBoolean());
+  result = eval(Op(ExpressionOperator::Less, {S64Const(-3), Ref("s")}));
+  EXPECT_TRUE(*result.AsBoolean());
+  result = eval(Op(ExpressionOperator::LessEqual, {F64Const(1.5), Ref("f")}));
+  EXPECT_TRUE(*result.AsBoolean());
+  result = eval(Op(ExpressionOperator::Greater, {Ref("u"), U64Const(4)}));
+  EXPECT_TRUE(*result.AsBoolean());
+  result = eval(Op(ExpressionOperator::GreaterEqual, {Ref("u"), U64Const(5)}));
+  EXPECT_TRUE(*result.AsBoolean());
+  result = eval(Op(ExpressionOperator::Equal, {StringConst("Game"), Ref("text")}));
+  EXPECT_TRUE(*result.AsBoolean());
+
+  result = eval(Op(ExpressionOperator::Not, {BoolConst(false)}));
+  EXPECT_TRUE(*result.AsBoolean());
+  result = eval(Op(ExpressionOperator::And, {BoolConst(true), BoolConst(true), BoolConst(false)}));
+  EXPECT_FALSE(*result.AsBoolean());
+  result = eval(Op(ExpressionOperator::Or, {BoolConst(false), BoolConst(false), BoolConst(true)}));
+  EXPECT_TRUE(*result.AsBoolean());
+  result = eval(Op(ExpressionOperator::And, {BoolConst(true), Ref("missing")}));
+  EXPECT_FALSE(result.IsAvailable());
+
+  result = eval(Op(ExpressionOperator::BitAnd, {U64Const(0b1100), U64Const(0b1010)}));
+  EXPECT_EQ(*result.AsUnsignedInteger(), 0b1000u);
+  result = eval(Op(ExpressionOperator::BitOr, {U64Const(0b1100), U64Const(0b0011)}));
+  EXPECT_EQ(*result.AsUnsignedInteger(), 0b1111u);
+  result = eval(Op(ExpressionOperator::BitXor, {U64Const(0b1100), U64Const(0b1010)}));
+  EXPECT_EQ(*result.AsUnsignedInteger(), 0b0110u);
+  result = eval(Op(ExpressionOperator::BitNot, {U64Const(0)}));
+  EXPECT_EQ(*result.AsUnsignedInteger(), std::numeric_limits<u64>::max());
+
+  result = eval(Op(ExpressionOperator::ToF64, {S64Const(-7)}));
+  EXPECT_DOUBLE_EQ(*result.AsFloatingPoint(), -7.0);
+  result = eval(Op(ExpressionOperator::ToF64, {U64Const(7)}));
+  EXPECT_DOUBLE_EQ(*result.AsFloatingPoint(), 7.0);
+  result = eval(Op(ExpressionOperator::ToF64, {F64Const(7.5)}));
+  EXPECT_DOUBLE_EQ(*result.AsFloatingPoint(), 7.5);
+
+  result = eval(Op(ExpressionOperator::If, {BoolConst(true), StringConst("yes"), Ref("missing")}));
+  EXPECT_EQ(*result.AsString(), "yes");
+  result = eval(Op(ExpressionOperator::If, {BoolConst(false), Ref("missing"), StringConst("no")}));
+  EXPECT_EQ(*result.AsString(), "no");
+  result = eval(Op(ExpressionOperator::If, {Ref("missing"), U64Const(1), U64Const(2)}));
+  EXPECT_FALSE(result.IsAvailable());
+  result = eval(
+      Op(ExpressionOperator::If,
+         {BoolConst(true), Op(ExpressionOperator::If, {BoolConst(false), U64Const(1), U64Const(2)}),
+          U64Const(3)}));
+  EXPECT_EQ(*result.AsUnsignedInteger(), 2u);
+}
+
+TEST(CheevoMapV2ExpressionEvaluator, EvaluatesArithmeticAndRuntimeSafety)
+{
+  StateValue result =
+      EvaluateExpression(Op(ExpressionOperator::Add, {S64Const(-2), S64Const(5)}), {});
+  EXPECT_EQ(*result.AsSignedInteger(), 3);
+  result = EvaluateExpression(Op(ExpressionOperator::Subtract, {U64Const(5), U64Const(2)}), {});
+  EXPECT_EQ(*result.AsUnsignedInteger(), 3u);
+  result = EvaluateExpression(Op(ExpressionOperator::Multiply, {F64Const(2.5), F64Const(2.0)}), {});
+  EXPECT_DOUBLE_EQ(*result.AsFloatingPoint(), 5.0);
+  result = EvaluateExpression(Op(ExpressionOperator::Divide, {S64Const(-5), S64Const(2)}), {});
+  EXPECT_EQ(*result.AsSignedInteger(), -2);
+  result = EvaluateExpression(Op(ExpressionOperator::Modulo, {U64Const(5), U64Const(2)}), {});
+  EXPECT_EQ(*result.AsUnsignedInteger(), 1u);
+
+  const std::vector<ExpressionNode> unavailable = {
+      Op(ExpressionOperator::Add, {S64Const(std::numeric_limits<s64>::max()), S64Const(1)}),
+      Op(ExpressionOperator::Subtract, {U64Const(0), U64Const(1)}),
+      Op(ExpressionOperator::Multiply, {U64Const(std::numeric_limits<u64>::max()), U64Const(2)}),
+      Op(ExpressionOperator::Divide, {U64Const(1), U64Const(0)}),
+      Op(ExpressionOperator::Modulo, {S64Const(1), S64Const(0)}),
+      Op(ExpressionOperator::Divide, {S64Const(std::numeric_limits<s64>::min()), S64Const(-1)}),
+      Op(ExpressionOperator::Modulo, {S64Const(std::numeric_limits<s64>::min()), S64Const(-1)}),
+      Op(ExpressionOperator::Multiply,
+         {F64Const(std::numeric_limits<double>::max()), F64Const(2.0)}),
+      Op(ExpressionOperator::Add, {StringConst("a"), StringConst("b")}),
+  };
+  for (const ExpressionNode& expression : unavailable)
+  {
+    result = EvaluateExpression(expression, {});
+    EXPECT_FALSE(result.IsAvailable());
+  }
+}
+
+TEST(CheevoMapV2ExpressionEvaluator, ConvertsFinalDeclaredTypes)
+{
+  EXPECT_TRUE(*ConvertExpressionResultToDeclaredType(StateValue::Boolean(true), ValueType::Boolean)
+                   .AsBoolean());
+  EXPECT_TRUE(ConvertExpressionResultToDeclaredType(StateValue::UnsignedInteger(255), ValueType::U8)
+                  .IsAvailable());
+  EXPECT_FALSE(
+      ConvertExpressionResultToDeclaredType(StateValue::UnsignedInteger(256), ValueType::U8)
+          .IsAvailable());
+  EXPECT_TRUE(ConvertExpressionResultToDeclaredType(StateValue::SignedInteger(-128), ValueType::S8)
+                  .IsAvailable());
+  EXPECT_FALSE(ConvertExpressionResultToDeclaredType(StateValue::SignedInteger(-129), ValueType::S8)
+                   .IsAvailable());
+  EXPECT_TRUE(
+      ConvertExpressionResultToDeclaredType(StateValue::UnsignedInteger(65535), ValueType::U16)
+          .IsAvailable());
+  EXPECT_FALSE(
+      ConvertExpressionResultToDeclaredType(StateValue::UnsignedInteger(65536), ValueType::U16)
+          .IsAvailable());
+  EXPECT_TRUE(ConvertExpressionResultToDeclaredType(StateValue::UnsignedInteger(4294967295ULL),
+                                                    ValueType::U32)
+                  .IsAvailable());
+  EXPECT_FALSE(ConvertExpressionResultToDeclaredType(StateValue::UnsignedInteger(4294967296ULL),
+                                                     ValueType::U32)
+                   .IsAvailable());
+  EXPECT_TRUE(
+      ConvertExpressionResultToDeclaredType(StateValue::SignedInteger(32767), ValueType::S16)
+          .IsAvailable());
+  EXPECT_FALSE(
+      ConvertExpressionResultToDeclaredType(StateValue::SignedInteger(32768), ValueType::S16)
+          .IsAvailable());
+  EXPECT_TRUE(ConvertExpressionResultToDeclaredType(
+                  StateValue::SignedInteger(std::numeric_limits<s32>::max()), ValueType::S32)
+                  .IsAvailable());
+  EXPECT_FALSE(ConvertExpressionResultToDeclaredType(
+                   StateValue::SignedInteger(static_cast<s64>(std::numeric_limits<s32>::max()) + 1),
+                   ValueType::S32)
+                   .IsAvailable());
+  EXPECT_TRUE(ConvertExpressionResultToDeclaredType(StateValue::FloatingPoint(1.25), ValueType::F32)
+                  .IsAvailable());
+  EXPECT_FALSE(
+      ConvertExpressionResultToDeclaredType(
+          StateValue::FloatingPoint(static_cast<double>(std::numeric_limits<float>::max()) * 2.0),
+          ValueType::F32)
+          .IsAvailable());
+  EXPECT_DOUBLE_EQ(
+      *ConvertExpressionResultToDeclaredType(StateValue::FloatingPoint(1.25), ValueType::F64)
+           .AsFloatingPoint(),
+      1.25);
+  EXPECT_EQ(*ConvertExpressionResultToDeclaredType(StateValue::String("ok"), ValueType::String)
+                 .AsString(),
+            "ok");
+}
+
 TEST(CheevoMapV2Decoder, KeepsSuccessfulValuesWhenAnotherReadFails)
 {
   Package package = ValidPackage();
   ValueDefinition failed = package.values.front();
   failed.id = "failed";
-  std::get<DirectMemoryRead>(failed.read).address = 0x20;
+  std::get<DirectMemoryRead>(*GetMutableReadDefinition(failed)).address = 0x20;
   package.values.push_back(failed);
 
   FakeDataSource data_source;
@@ -1708,7 +2198,7 @@ TEST(CheevoMapV2PointerRuntime, StaticPointerPlanFailuresPreventMemoryReads)
   package.game.id = "GAME01";
   package.metadata.title = "Test";
   ValueDefinition value = PointerValue("score", ValueType::U32, {0x10});
-  std::get<PointerChainRead>(value.read).base.area_id = "missing";
+  std::get<PointerChainRead>(*GetMutableReadDefinition(value)).base.area_id = "missing";
   package.values.push_back(value);
 
   FakeDataSource data_source;
@@ -1718,7 +2208,8 @@ TEST(CheevoMapV2PointerRuntime, StaticPointerPlanFailuresPreventMemoryReads)
   EXPECT_EQ(data_source.grouped_read_count, 0);
 
   package.values.front() = PointerValue("score", ValueType::U32, {0x10});
-  std::get<PointerChainRead>(package.values.front().read).target_area_ids = {"missing"};
+  std::get<PointerChainRead>(*GetMutableReadDefinition(package.values.front())).target_area_ids = {
+      "missing"};
   EXPECT_FALSE(EvaluatePackage(package, data_source, &error));
   EXPECT_NE(error.find("unknown pointer_chain.target_area"), std::string::npos);
   EXPECT_EQ(data_source.grouped_read_count, 0);
@@ -1736,6 +2227,145 @@ TEST(CheevoMapV2PointerRuntime, DirectOnlyStillMakesExactlyOneGroupedRead)
   EXPECT_EQ(*result->values.at("coins").AsUnsignedInteger(), 0x1234u);
   EXPECT_EQ(data_source.grouped_read_count, 1);
   EXPECT_EQ(data_source.single_read_count, 0);
+}
+
+TEST(CheevoMapV2ExpressionRuntime, EvaluatesReadsExpressionsAndForwardChains)
+{
+  Package package = ValidPackage();
+  package.values.push_back(
+      ExpressionValue("has_coins", ValueType::Boolean,
+                      Op(ExpressionOperator::Greater, {Ref("coins"), U64Const(0)})));
+  package.values.push_back(ExpressionValue(
+      "double_coins", ValueType::U16, Op(ExpressionOperator::Add, {Ref("coins"), Ref("coins")})));
+  package.values.push_back(ExpressionValue("future_copy", ValueType::U16, Ref("future")));
+  package.values.push_back(ExpressionValue(
+      "future", ValueType::U16, Op(ExpressionOperator::Add, {Ref("double_coins"), U64Const(1)})));
+
+  FakeDataSource data_source;
+  data_source.Write(0x10, {0x00, 0x03});
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_TRUE(*result->values.at("has_coins").AsBoolean());
+  EXPECT_EQ(*result->values.at("double_coins").AsUnsignedInteger(), 6u);
+  EXPECT_EQ(*result->values.at("future").AsUnsignedInteger(), 7u);
+  EXPECT_EQ(*result->values.at("future_copy").AsUnsignedInteger(), 7u);
+  EXPECT_EQ(data_source.grouped_read_count, 1);
+}
+
+TEST(CheevoMapV2ExpressionRuntime, PointerReadsFeedExpressionsWithoutExtraGroupedReads)
+{
+  Package package;
+  package.game.id = "GAME01";
+  package.metadata.title = "Test";
+  package.values.push_back(PointerValue("score", ValueType::U32, {0x10}));
+  package.values.push_back(
+      ExpressionValue("score_ready", ValueType::Boolean,
+                      Op(ExpressionOperator::Equal, {Ref("score"), U64Const(9)})));
+
+  FakeDataSource data_source;
+  WriteU32(&data_source, 0x100, 0x200, Endian::Big);
+  data_source.Write(0x210, {0x00, 0x00, 0x00, 0x09});
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_TRUE(*result->values.at("score_ready").AsBoolean());
+  EXPECT_EQ(data_source.grouped_read_count, 2);
+}
+
+TEST(CheevoMapV2ExpressionRuntime, UnavailabilityAndArithmeticErrorsAreLocal)
+{
+  Package package = ValidPackage();
+  package.values.push_back(DirectValue("missing", ValueType::U8, "mem1", 0x20));
+  package.values.push_back(
+      ExpressionValue("missing_bool", ValueType::Boolean,
+                      Op(ExpressionOperator::Equal, {Ref("missing"), U64Const(1)})));
+  package.values.push_back(
+      ExpressionValue("divide_by_zero", ValueType::U64,
+                      Op(ExpressionOperator::Divide, {Ref("coins"), U64Const(0)})));
+  package.values.push_back(ExpressionValue("constant_ok", ValueType::Boolean, BoolConst(true)));
+
+  FakeDataSource data_source;
+  data_source.Write(0x10, {0x00, 0x03});
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_EQ(*result->values.at("coins").AsUnsignedInteger(), 3u);
+  EXPECT_FALSE(result->values.at("missing").IsAvailable());
+  EXPECT_FALSE(result->values.at("missing_bool").IsAvailable());
+  EXPECT_FALSE(result->values.at("divide_by_zero").IsAvailable());
+  EXPECT_TRUE(*result->values.at("constant_ok").AsBoolean());
+}
+
+TEST(CheevoMapV2ExpressionRuntime, ConstantOnlyPackagePerformsZeroReads)
+{
+  Package package;
+  package.game.id = "GAME01";
+  package.metadata.title = "Test";
+  package.values.push_back(ExpressionValue("ready", ValueType::Boolean, BoolConst(true)));
+  package.values.push_back(ExpressionValue("title", ValueType::String, StringConst("Game")));
+
+  FakeDataSource data_source;
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_TRUE(*result->values.at("ready").AsBoolean());
+  EXPECT_EQ(*result->values.at("title").AsString(), "Game");
+  EXPECT_EQ(data_source.grouped_read_count, 0);
+  EXPECT_EQ(data_source.single_read_count, 0);
+}
+
+TEST(CheevoMapV2ExpressionRuntimeState, PublishesExpressionDeltasAndRejectsStaleSessions)
+{
+  Package package = ValidPackage();
+  package.values.push_back(
+      ExpressionValue("has_coins", ValueType::Boolean,
+                      Op(ExpressionOperator::Greater, {Ref("coins"), U64Const(0)})));
+
+  FakeDataSource data_source;
+  data_source.Write(0x10, {0x00, 0x00});
+
+  StateStore store;
+  std::vector<StateUpdate> updates;
+  auto hook = store.RegisterUpdateCallback(
+      [&updates](const StateUpdate& update) { updates.push_back(update); });
+  (void)hook;
+
+  const StateUpdate reset =
+      store.Reset({{"coins", StateValue::Unavailable()}, {"has_coins", StateValue::Unavailable()}});
+  std::string error;
+  auto applied = EvaluatePackageForSession(package, data_source, store, reset.session_id, &error);
+  EXPECT_EQ(applied.status, PackageRuntimeStatus::Applied);
+  ASSERT_EQ(updates.size(), 2u);
+  EXPECT_FALSE(*updates.back().values.at("has_coins").AsBoolean());
+
+  data_source.Write(0x10, {0x00, 0x01});
+  applied = EvaluatePackageForSession(package, data_source, store, reset.session_id, &error);
+  EXPECT_EQ(applied.status, PackageRuntimeStatus::Applied);
+  ASSERT_EQ(updates.size(), 3u);
+  EXPECT_TRUE(*updates.back().values.at("has_coins").AsBoolean());
+
+  data_source.Write(0x10, {0x00, 0x02});
+  applied = EvaluatePackageForSession(package, data_source, store, reset.session_id, &error);
+  EXPECT_EQ(applied.status, PackageRuntimeStatus::Applied);
+  ASSERT_EQ(updates.size(), 4u);
+  EXPECT_TRUE(updates.back().values.contains("coins"));
+  EXPECT_FALSE(updates.back().values.contains("has_coins"));
+
+  data_source.failed_addresses.insert(0x10);
+  applied = EvaluatePackageForSession(package, data_source, store, reset.session_id, &error);
+  EXPECT_EQ(applied.status, PackageRuntimeStatus::Applied);
+  ASSERT_EQ(updates.size(), 5u);
+  EXPECT_FALSE(updates.back().values.at("has_coins").IsAvailable());
+
+  const StateUpdate reloaded =
+      store.Reset({{"coins", StateValue::Unavailable()}, {"has_coins", StateValue::Unavailable()}});
+  applied = EvaluatePackageForSession(package, data_source, store, reset.session_id, &error);
+  EXPECT_EQ(applied.status, PackageRuntimeStatus::StaleSession);
+  EXPECT_EQ(store.GetSnapshot().session_id, reloaded.session_id);
 }
 
 TEST(CheevoMapV2PointerRuntimeState, PublishesPointerAvailabilityDeltas)
@@ -1859,7 +2489,7 @@ TEST(CheevoMapV2RuntimeState, PublishesDeltasAndRejectsStaleSessions)
 TEST(CheevoMapV2RuntimeState, EvaluationFailureIsDistinctFromNoChanges)
 {
   Package package = ValidPackage();
-  std::get<DirectMemoryRead>(package.values.front().read).area_id = "missing";
+  std::get<DirectMemoryRead>(*GetMutableReadDefinition(package.values.front())).area_id = "missing";
 
   FakeDataSource data_source;
   StateStore store;

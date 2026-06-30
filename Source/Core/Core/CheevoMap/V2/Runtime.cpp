@@ -5,6 +5,7 @@
 
 #include <fmt/format.h>
 
+#include "Core/CheevoMap/V2/ExpressionEvaluator.h"
 #include "Core/CheevoMap/V2/ReadPlanner.h"
 
 namespace CheevoMap::V2
@@ -44,11 +45,13 @@ std::optional<EvaluationResult> EvaluatePackage(const Package& package,
   if (!ValidatePackageGameIdentity(package.game, data_source.GetGameIdentity(), error_out))
     return std::nullopt;
 
-  const auto plan = BuildReadPlan(package, data_source.GetMemoryAreas(), error_out);
+  const auto plan = BuildEvaluationPlan(package, data_source.GetMemoryAreas(), error_out);
   if (!plan)
     return std::nullopt;
 
-  return EvaluationResult{EvaluateReadPlan(*plan, data_source)};
+  StateValueMap values = EvaluateReadPlan(plan->read_plan, data_source);
+  EvaluateExpressions(plan->expressions_in_evaluation_order, &values);
+  return EvaluationResult{std::move(values)};
 }
 
 PackageRuntimeResult EvaluatePackageForSession(const Package& package,

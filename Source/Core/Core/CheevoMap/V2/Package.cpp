@@ -122,6 +122,37 @@ u32 GetValueReadSize(const ValueDefinition& value)
   return 0;
 }
 
+bool IsReadBackedValue(const ValueDefinition& value)
+{
+  return std::holds_alternative<ReadValueSource>(value.source);
+}
+
+bool IsExpressionBackedValue(const ValueDefinition& value)
+{
+  return std::holds_alternative<ExpressionValueSource>(value.source);
+}
+
+const MemoryReadDefinition* GetReadDefinition(const ValueDefinition& value)
+{
+  if (const auto* source = std::get_if<ReadValueSource>(&value.source))
+    return &source->read;
+  return nullptr;
+}
+
+MemoryReadDefinition* GetMutableReadDefinition(ValueDefinition& value)
+{
+  if (auto* source = std::get_if<ReadValueSource>(&value.source))
+    return &source->read;
+  return nullptr;
+}
+
+const ExpressionNode* GetExpressionDefinition(const ValueDefinition& value)
+{
+  if (const auto* source = std::get_if<ExpressionValueSource>(&value.source))
+    return &source->expression;
+  return nullptr;
+}
+
 bool ValueTypeRequiresEndian(ValueType type)
 {
   switch (type)
