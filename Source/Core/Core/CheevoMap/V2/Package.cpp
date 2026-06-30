@@ -77,6 +77,26 @@ const char* ValueTypeName(ValueType type)
   return "unknown";
 }
 
+const char* PointerTypeName(PointerType type)
+{
+  switch (type)
+  {
+  case PointerType::U32:
+    return "u32";
+  }
+  return "unknown";
+}
+
+u32 GetPointerReadSize(PointerType type)
+{
+  switch (type)
+  {
+  case PointerType::U32:
+    return 4;
+  }
+  return 0;
+}
+
 u32 GetValueReadSize(const ValueDefinition& value)
 {
   switch (value.type)

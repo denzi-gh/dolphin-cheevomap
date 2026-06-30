@@ -5,6 +5,7 @@
 
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include "Common/CommonTypes.h"
@@ -34,6 +35,11 @@ enum class Endian : u8
   Little,
 };
 
+enum class PointerType : u8
+{
+  U32,
+};
+
 struct DirectMemoryRead
 {
   std::string area_id;
@@ -41,12 +47,30 @@ struct DirectMemoryRead
   Endian endian = Endian::None;
 };
 
+struct PointerChainBase
+{
+  std::string area_id;
+  u64 address = 0;
+};
+
+struct PointerChainRead
+{
+  PointerChainBase base;
+  std::string target_area_id;
+  std::vector<u64> offsets;
+  PointerType pointer_type = PointerType::U32;
+  Endian pointer_endian = Endian::None;
+  Endian endian = Endian::None;
+};
+
+using MemoryReadDefinition = std::variant<DirectMemoryRead, PointerChainRead>;
+
 struct ValueDefinition
 {
   std::string id;
   ValueType type = ValueType::U8;
   u32 bytes = 0;
-  DirectMemoryRead read;
+  MemoryReadDefinition read;
 };
 
 struct GameInfo
@@ -72,6 +96,8 @@ struct Package
 std::optional<ValueType> ParseValueType(std::string_view text);
 std::optional<Endian> ParseEndian(std::string_view text);
 const char* ValueTypeName(ValueType type);
+const char* PointerTypeName(PointerType type);
+u32 GetPointerReadSize(PointerType type);
 u32 GetValueReadSize(const ValueDefinition& value);
 bool ValueTypeRequiresEndian(ValueType type);
 bool ValueTypeAllowsEndian(ValueType type);

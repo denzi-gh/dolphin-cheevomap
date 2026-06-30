@@ -65,6 +65,13 @@ struct MemoryReadResult
   std::vector<u8> bytes;
 };
 
+struct PointerAddressResolution
+{
+  bool success = false;
+  u64 address = 0;
+  MemoryReadError error = MemoryReadError::None;
+};
+
 class EmulatorDataSource
 {
 public:
@@ -77,5 +84,7 @@ public:
   virtual bool ReadMemory(u64 address, u8* out, std::size_t size) const = 0;
   virtual std::vector<MemoryReadResult> ReadMemory(
       const std::vector<MemoryReadRequest>& requests) const;
+  virtual PointerAddressResolution ResolvePointerAddress(const std::string& target_area_id,
+                                                         u64 raw_pointer) const;
 };
 }  // namespace CheevoMap::V2

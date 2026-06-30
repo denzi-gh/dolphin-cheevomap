@@ -3,6 +3,7 @@
 
 #include "Core/CheevoMap/V2/EmulatorDataSource.h"
 
+#include <limits>
 #include <utility>
 
 namespace CheevoMap::V2
@@ -36,5 +37,30 @@ std::vector<MemoryReadResult> EmulatorDataSource::ReadMemory(
   }
 
   return results;
+}
+
+PointerAddressResolution
+EmulatorDataSource::ResolvePointerAddress(const std::string& target_area_id,
+                                          const u64 raw_pointer) const
+{
+  if (raw_pointer == 0)
+    return {false, 0, MemoryReadError::InvalidAddress};
+
+  for (const MemoryArea& area : GetMemoryAreas())
+  {
+    if (area.id != target_area_id)
+      continue;
+
+    if (area.size > std::numeric_limits<u64>::max() - area.base_address)
+      return {false, 0, MemoryReadError::InvalidAddress};
+
+    const u64 area_end = area.base_address + area.size;
+    if (raw_pointer < area.base_address || raw_pointer >= area_end)
+      return {false, 0, MemoryReadError::InvalidAddress};
+
+    return {true, raw_pointer, MemoryReadError::None};
+  }
+
+  return {false, 0, MemoryReadError::UnsupportedMemoryArea};
 }
 }  // namespace CheevoMap::V2

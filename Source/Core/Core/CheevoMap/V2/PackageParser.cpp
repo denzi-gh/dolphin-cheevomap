@@ -71,6 +71,22 @@ bool ParseHexU64(std::string_view text, u64* out)
   return true;
 }
 
+bool ParseLowerHexU64(std::string_view text, u64* out)
+{
+  if (text.size() < 3 || text[0] != '0' || text[1] != 'x')
+    return false;
+
+  u64 value = 0;
+  const char* first = text.data() + 2;
+  const char* last = text.data() + text.size();
+  const auto [ptr, ec] = std::from_chars(first, last, value, 16);
+  if (ec != std::errc{} || ptr != last)
+    return false;
+
+  *out = value;
+  return true;
+}
+
 bool ParseGame(const picojson::value& value, GameInfo* out, std::string* error)
 {
   if (!value.is<picojson::object>())
@@ -127,7 +143,195 @@ bool ParseMetadata(const picojson::value& value, PackageMetadata* out, std::stri
   return true;
 }
 
-bool ParseRead(const picojson::value& value, ValueType type, DirectMemoryRead* out,
+bool ParseFinalEndian(const picojson::object& object, ValueType type, Endian* out,
+                      std::string* error)
+{
+  const auto endian_it = object.find("endian");
+  if (ValueTypeRequiresEndian(type))
+  {
+    if (endian_it == object.end())
+    {
+      *error = fmt::format("read.endian is required for {}", ValueTypeName(type));
+      return false;
+    }
+    if (!endian_it->second.is<std::string>())
+    {
+      *error = "read.endian must be \"big\" or \"little\"";
+      return false;
+    }
+
+    const std::optional<Endian> parsed = ParseEndian(endian_it->second.get<std::string>());
+    if (!parsed)
+    {
+      *error = "read.endian must be \"big\" or \"little\"";
+      return false;
+    }
+    *out = *parsed;
+  }
+  else if (endian_it != object.end())
+  {
+    *error = fmt::format("read.endian is not valid for {}", ValueTypeName(type));
+    return false;
+  }
+
+  return true;
+}
+
+bool ParsePointerChainBase(const picojson::value& value, PointerChainBase* out, std::string* error)
+{
+  if (!value.is<picojson::object>())
+  {
+    *error = "read.pointer_chain.base must be an object";
+    return false;
+  }
+
+  const auto& object = value.get<picojson::object>();
+  if (!CheckAllowedFields(object, {"area", "address"}, "read.pointer_chain.base", error))
+    return false;
+
+  const auto area = ReadStringFromJson(object, "area");
+  if (!area || area->empty())
+  {
+    *error = "read.pointer_chain.base.area must be a non-empty string";
+    return false;
+  }
+  out->area_id = *area;
+
+  const auto address = ReadStringFromJson(object, "address");
+  if (!address || !ParseLowerHexU64(*address, &out->address))
+  {
+    *error = "read.pointer_chain.base.address must be a 0x-prefixed u64 hex string";
+    return false;
+  }
+
+  return true;
+}
+
+bool ParsePointerChain(const picojson::value& value, PointerChainRead* out, std::string* error)
+{
+  if (!value.is<picojson::object>())
+  {
+    *error = "read.pointer_chain must be an object";
+    return false;
+  }
+
+  const auto& object = value.get<picojson::object>();
+  if (!CheckAllowedFields(object, {"base", "target_area", "offsets", "pointer_type", "endian"},
+                          "read.pointer_chain", error))
+  {
+    return false;
+  }
+
+  const auto base_it = object.find("base");
+  if (base_it == object.end())
+  {
+    *error = "read.pointer_chain.base is required";
+    return false;
+  }
+  if (!ParsePointerChainBase(base_it->second, &out->base, error))
+    return false;
+
+  const auto target_area_it = object.find("target_area");
+  if (target_area_it == object.end())
+  {
+    *error = "read.pointer_chain.target_area must be a non-empty string";
+    return false;
+  }
+  if (!target_area_it->second.is<std::string>())
+  {
+    *error = "read.pointer_chain.target_area must be a string";
+    return false;
+  }
+  out->target_area_id = target_area_it->second.get<std::string>();
+  if (out->target_area_id.empty())
+  {
+    *error = "read.pointer_chain.target_area must be a non-empty string";
+    return false;
+  }
+
+  const auto offsets_it = object.find("offsets");
+  if (offsets_it == object.end())
+  {
+    *error = "read.pointer_chain.offsets is required";
+    return false;
+  }
+  if (!offsets_it->second.is<picojson::array>())
+  {
+    *error = "read.pointer_chain.offsets must be an array";
+    return false;
+  }
+
+  const auto& offsets = offsets_it->second.get<picojson::array>();
+  if (offsets.empty())
+  {
+    *error = "read.pointer_chain.offsets must contain at least 1 offset";
+    return false;
+  }
+  if (offsets.size() > 16)
+  {
+    *error = "read.pointer_chain.offsets must contain at most 16 offsets";
+    return false;
+  }
+
+  out->offsets.clear();
+  out->offsets.reserve(offsets.size());
+  for (size_t i = 0; i < offsets.size(); ++i)
+  {
+    if (!offsets[i].is<std::string>())
+    {
+      *error = fmt::format("read.pointer_chain.offsets[{}] must be a 0x-prefixed u64 hex string",
+                           i);
+      return false;
+    }
+
+    u64 offset = 0;
+    if (!ParseLowerHexU64(offsets[i].get<std::string>(), &offset))
+    {
+      *error = fmt::format("read.pointer_chain.offsets[{}] must be a 0x-prefixed u64 hex string",
+                           i);
+      return false;
+    }
+    out->offsets.push_back(offset);
+  }
+
+  const auto pointer_type_it = object.find("pointer_type");
+  if (pointer_type_it == object.end())
+  {
+    *error = "read.pointer_chain.pointer_type is required";
+    return false;
+  }
+  if (!pointer_type_it->second.is<std::string>() ||
+      pointer_type_it->second.get<std::string>() != "u32")
+  {
+    *error = "read.pointer_chain.pointer_type must be \"u32\"";
+    return false;
+  }
+  out->pointer_type = PointerType::U32;
+
+  const auto endian_it = object.find("endian");
+  if (endian_it == object.end())
+  {
+    *error = "read.pointer_chain.endian is required";
+    return false;
+  }
+  if (!endian_it->second.is<std::string>())
+  {
+    *error = "read.pointer_chain.endian must be a string";
+    return false;
+  }
+
+  const std::optional<Endian> pointer_endian = ParseEndian(endian_it->second.get<std::string>());
+  if (!pointer_endian)
+  {
+    *error = "read.pointer_chain.endian must be \"big\" or \"little\"";
+    return false;
+  }
+  out->pointer_endian = *pointer_endian;
+
+  return true;
+}
+
+bool ParseRead(const picojson::value& value, ValueType type, MemoryReadDefinition* out,
                std::string* error)
 {
   if (!value.is<picojson::object>())
@@ -137,46 +341,55 @@ bool ParseRead(const picojson::value& value, ValueType type, DirectMemoryRead* o
   }
 
   const auto& object = value.get<picojson::object>();
-  if (!CheckAllowedFields(object, {"area", "address", "endian"}, "read", error))
+  if (!CheckAllowedFields(object, {"area", "address", "endian", "pointer_chain"}, "read", error))
     return false;
 
+  const bool has_pointer_chain = object.contains("pointer_chain");
+  const bool has_direct_area = object.contains("area");
+  const bool has_direct_address = object.contains("address");
+  if (has_pointer_chain && (has_direct_area || has_direct_address))
+  {
+    *error = "read must not mix direct area/address fields with pointer_chain";
+    return false;
+  }
+  if (!has_pointer_chain && !has_direct_area && !has_direct_address)
+  {
+    *error = "read must contain either direct area/address fields or pointer_chain";
+    return false;
+  }
+
+  Endian final_endian = Endian::None;
+  if (!ParseFinalEndian(object, type, &final_endian, error))
+    return false;
+
+  if (has_pointer_chain)
+  {
+    PointerChainRead pointer_chain;
+    if (!ParsePointerChain(object.at("pointer_chain"), &pointer_chain, error))
+      return false;
+    pointer_chain.endian = final_endian;
+    *out = std::move(pointer_chain);
+    return true;
+  }
+
+  DirectMemoryRead direct;
   const auto area = ReadStringFromJson(object, "area");
   if (!area || area->empty())
   {
     *error = "read.area must be a non-empty string";
     return false;
   }
-  out->area_id = *area;
+  direct.area_id = *area;
 
   const auto address = ReadStringFromJson(object, "address");
-  if (!address || !ParseHexU64(*address, &out->address))
+  if (!address || !ParseHexU64(*address, &direct.address))
   {
     *error = "read.address must be a 0x-prefixed u64 hex string";
     return false;
   }
 
-  const auto endian = ReadStringFromJson(object, "endian");
-  if (ValueTypeRequiresEndian(type))
-  {
-    if (!endian)
-    {
-      *error = fmt::format("read.endian is required for {}", ValueTypeName(type));
-      return false;
-    }
-    const std::optional<Endian> parsed = ParseEndian(*endian);
-    if (!parsed)
-    {
-      *error = "read.endian must be \"big\" or \"little\"";
-      return false;
-    }
-    out->endian = *parsed;
-  }
-  else if (endian)
-  {
-    *error = fmt::format("read.endian is not valid for {}", ValueTypeName(type));
-    return false;
-  }
-
+  direct.endian = final_endian;
+  *out = std::move(direct);
   return true;
 }
 

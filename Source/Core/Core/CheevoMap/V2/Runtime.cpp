@@ -48,8 +48,7 @@ std::optional<EvaluationResult> EvaluatePackage(const Package& package,
   if (!plan)
     return std::nullopt;
 
-  const std::vector<MemoryReadResult> results = data_source.ReadMemory(plan->requests);
-  return EvaluationResult{DecodeReadResults(*plan, results)};
+  return EvaluationResult{EvaluateReadPlan(*plan, data_source)};
 }
 
 PackageRuntimeResult EvaluatePackageForSession(const Package& package,

@@ -18,6 +18,7 @@ constexpr u64 MEM1_BASE = 0x00000000;
 constexpr u64 MEM1_SIZE = 0x04000000;
 constexpr u64 MEM2_BASE = 0x10000000;
 constexpr u64 MEM2_SIZE = 0x04000000;
+constexpr u64 PPC_PHYSICAL_MASK = 0x1fffffff;
 
 V2::EmulatorStatus ToStatus(Core::State state)
 {
@@ -36,6 +37,30 @@ V2::EmulatorStatus ToStatus(Core::State state)
   return V2::EmulatorStatus::Unavailable;
 }
 }  // namespace
+
+V2::PointerAddressResolution ResolveDolphinPointerAddress(std::string_view target_area_id,
+                                                          const u64 raw_pointer)
+{
+  // Dolphin accepts PowerPC virtual aliases here portable pointer chain runtime only sees the
+  //normalized emulated-physical address returned by this adapter boundaryy
+  if (raw_pointer == 0)
+    return {false, 0, V2::MemoryReadError::InvalidAddress};
+
+  const u64 physical = raw_pointer & PPC_PHYSICAL_MASK;
+  if (physical == 0)
+    return {false, 0, V2::MemoryReadError::InvalidAddress};
+
+  const bool in_mem1 = physical >= MEM1_BASE && physical < MEM1_BASE + MEM1_SIZE;
+  const bool in_mem2 = physical >= MEM2_BASE && physical < MEM2_BASE + MEM2_SIZE;
+  if (!in_mem1 && !in_mem2)
+    return {false, 0, V2::MemoryReadError::InvalidAddress};
+
+  const std::string_view actual_area = in_mem1 ? std::string_view{"mem1"} : std::string_view{"mem2"};
+  if (target_area_id != actual_area)
+    return {false, 0, V2::MemoryReadError::InvalidAddress};
+
+  return {true, physical, V2::MemoryReadError::None};
+}
 
 DolphinEmulatorDataSource::DolphinEmulatorDataSource(const Core::CPUThreadGuard& guard)
     : m_guard(guard)
@@ -146,5 +171,12 @@ std::vector<V2::MemoryReadResult> DolphinEmulatorDataSource::ReadMemory(
   }
 
   return results;
+}
+
+V2::PointerAddressResolution
+DolphinEmulatorDataSource::ResolvePointerAddress(const std::string& target_area_id,
+                                                 const u64 raw_pointer) const
+{
+  return ResolveDolphinPointerAddress(target_area_id, raw_pointer);
 }
 }  // namespace CheevoMap::Dolphin

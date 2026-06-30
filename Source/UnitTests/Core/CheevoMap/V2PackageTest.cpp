@@ -22,6 +22,7 @@
 
 #include "Core/CheevoMap/CheevoMapFile.h"
 #include "Core/CheevoMap/CheevoMapManager.h"
+#include "Core/CheevoMap/Dolphin/DolphinEmulatorDataSource.h"
 #include "Core/CheevoMap/V2/PackageParser.h"
 #include "Core/CheevoMap/V2/ReadPlanner.h"
 #include "Core/CheevoMap/V2/Runtime.h"
@@ -31,6 +32,7 @@ namespace
 using CheevoMap::Manager;
 using CheevoMap::V2::BuildReadPlan;
 using CheevoMap::V2::DecodeReadResults;
+using CheevoMap::V2::DirectMemoryRead;
 using CheevoMap::V2::EmulatorDataSource;
 using CheevoMap::V2::EmulatorStatus;
 using CheevoMap::V2::Endian;
@@ -45,6 +47,9 @@ using CheevoMap::V2::MemoryReadResult;
 using CheevoMap::V2::Package;
 using CheevoMap::V2::PackageRuntimeStatus;
 using CheevoMap::V2::ParsePackage;
+using CheevoMap::V2::PointerAddressResolution;
+using CheevoMap::V2::PointerChainRead;
+using CheevoMap::V2::PointerType;
 using CheevoMap::V2::ReadPlan;
 using CheevoMap::V2::StateApplyStatus;
 using CheevoMap::V2::StateStore;
@@ -53,6 +58,7 @@ using CheevoMap::V2::StateValue;
 using CheevoMap::V2::ValidatePackageGameIdentity;
 using CheevoMap::V2::ValueDefinition;
 using CheevoMap::V2::ValueType;
+using CheevoMap::Dolphin::ResolveDolphinPointerAddress;
 
 class FakeDataSource final : public EmulatorDataSource
 {
@@ -84,6 +90,7 @@ public:
   {
     ++grouped_read_count;
     last_requests = requests;
+    grouped_requests.push_back(requests);
     if (on_grouped_read)
       on_grouped_read();
 
@@ -119,6 +126,16 @@ public:
     return results;
   }
 
+  PointerAddressResolution ResolvePointerAddress(const std::string& target_area_id,
+                                                 u64 raw_pointer) const override
+  {
+    ++pointer_resolution_count;
+    if (failed_pointer_resolutions.contains(raw_pointer))
+      return {false, 0, MemoryReadError::InvalidAddress};
+
+    return EmulatorDataSource::ResolvePointerAddress(target_area_id, raw_pointer);
+  }
+
   void Write(u64 address, std::initializer_list<u8> bytes)
   {
     for (const u8 byte : bytes)
@@ -127,11 +144,14 @@ public:
 
   mutable int single_read_count = 0;
   mutable int grouped_read_count = 0;
+  mutable int pointer_resolution_count = 0;
   mutable std::vector<MemoryReadRequest> last_requests;
+  mutable std::vector<std::vector<MemoryReadRequest>> grouped_requests;
   mutable std::function<void()> on_grouped_read;
   GameIdentity identity{"GAME01", "", 0, 0};
   std::map<u64, u8> memory;
   std::set<u64> failed_addresses;
+  std::set<u64> failed_pointer_resolutions;
 };
 
 class TempDir
@@ -172,6 +192,53 @@ std::optional<Package> ParseText(const std::string& json, std::string* error)
   return ParsePackage(root, error);
 }
 
+void SetDirectRead(ValueDefinition* value, std::string area_id, u64 address,
+                   Endian endian = Endian::None)
+{
+  value->read = DirectMemoryRead{std::move(area_id), address, endian};
+}
+
+void SetPointerChainRead(ValueDefinition* value, std::string base_area_id, u64 base_address,
+                         std::string target_area_id, std::vector<u64> offsets,
+                         Endian pointer_endian, Endian final_endian = Endian::None)
+{
+  PointerChainRead read;
+  read.base.area_id = std::move(base_area_id);
+  read.base.address = base_address;
+  read.target_area_id = std::move(target_area_id);
+  read.offsets = std::move(offsets);
+  read.pointer_type = PointerType::U32;
+  read.pointer_endian = pointer_endian;
+  read.endian = final_endian;
+  value->read = std::move(read);
+}
+
+void WriteU32(FakeDataSource* data_source, u64 address, u32 value, Endian endian)
+{
+  if (endian == Endian::Little)
+  {
+    data_source->Write(address, {static_cast<u8>(value), static_cast<u8>(value >> 8),
+                                 static_cast<u8>(value >> 16), static_cast<u8>(value >> 24)});
+    return;
+  }
+
+  data_source->Write(address, {static_cast<u8>(value >> 24), static_cast<u8>(value >> 16),
+                               static_cast<u8>(value >> 8), static_cast<u8>(value)});
+}
+
+ValueDefinition PointerValue(std::string id, ValueType type, std::vector<u64> offsets,
+                             Endian pointer_endian = Endian::Big,
+                             Endian final_endian = Endian::Big, u32 bytes = 0)
+{
+  ValueDefinition value;
+  value.id = std::move(id);
+  value.type = type;
+  value.bytes = bytes;
+  SetPointerChainRead(&value, "mem1", 0x100, "mem1", std::move(offsets), pointer_endian,
+                      final_endian);
+  return value;
+}
+
 Package ValidPackage()
 {
   Package package;
@@ -181,9 +248,7 @@ Package ValidPackage()
   ValueDefinition coins;
   coins.id = "coins";
   coins.type = ValueType::U16;
-  coins.read.area_id = "mem1";
-  coins.read.address = 0x10;
-  coins.read.endian = Endian::Big;
+  SetDirectRead(&coins, "mem1", 0x10, Endian::Big);
   package.values.push_back(coins);
 
   return package;
@@ -264,6 +329,26 @@ picojson::value NonFiniteNumber(double number)
   picojson::value value;
   value.set<double>(number);
   return value;
+}
+
+std::string PackageJson(const std::string& values_json)
+{
+  return R"({"schema_version":2,"game":{"id":"GAME01"},"package":{"title":"Test Game"},"values":[)" +
+         values_json + "]}";
+}
+
+std::string GoodPointerChainJson()
+{
+  return R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x0","0x160","0x420"],"pointer_type":"u32","endian":"big")";
+}
+
+std::string PointerValueJson(std::string type, std::string bytes_member,
+                             std::string pointer_chain_members = GoodPointerChainJson(),
+                             std::string read_members = R"(,"endian":"big")")
+{
+  return R"({"id":"p","type":")" + std::move(type) + "\"," + std::move(bytes_member) +
+         R"("read":{"pointer_chain":{)" + std::move(pointer_chain_members) + "}" +
+         std::move(read_members) + "}}";
 }
 
 TEST(CheevoMapV2Identity, ValidatesGameIdAndOptionalRevision)
@@ -402,6 +487,131 @@ TEST(CheevoMapV2Parser, AcceptsMaximumStringLength)
   EXPECT_EQ(package->values[0].bytes, 256u);
 }
 
+TEST(CheevoMapV2Parser, AcceptsPointerChainPackages)
+{
+  const std::vector<std::string> values = {
+      PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+      PointerValueJson("u32", "", GoodPointerChainJson()),
+      PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x0"],"pointer_type":"u32","endian":"big")"),
+      PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"little")"),
+      PointerValueJson("u8", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")", ""),
+      PointerValueJson("u16", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+      PointerValueJson("f32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"little")", R"(,"endian":"big")"),
+      PointerValueJson("string", R"("bytes":8,)", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")", ""),
+      PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x0","0x1","0x2","0x3","0x4","0x5","0x6","0x7","0x8","0x9","0xa","0xb","0xc","0xd","0xe","0xf"],"pointer_type":"u32","endian":"big")"),
+  };
+
+  for (const std::string& value : values)
+  {
+    std::string error;
+    const auto package = ParseText(PackageJson(value), &error);
+    EXPECT_TRUE(package) << error << "\n" << value;
+  }
+
+  std::string error;
+  const auto mixed = ParseText(PackageJson(R"({"id":"direct","type":"u8","read":{"area":"mem1","address":"0x0"}},)" +
+                                     PointerValueJson("u32", "")),
+                               &error);
+  ASSERT_TRUE(mixed) << error;
+  ASSERT_EQ(mixed->values.size(), 2u);
+}
+
+TEST(CheevoMapV2Parser, RejectsInvalidPointerChainPackages)
+{
+  const std::vector<std::pair<std::string, std::string>> cases = {
+      {std::string(R"({"id":"p","type":"u32","read":{"area":"mem1","address":"0x0","pointer_chain":{)") +
+           GoodPointerChainJson() + R"(},"endian":"big"}})",
+       "must not mix"},
+      {std::string(R"({"id":"p","type":"u32","read":{"area":"mem1","pointer_chain":{)") +
+           GoodPointerChainJson() + R"(},"endian":"big"}})",
+       "must not mix"},
+      {std::string(R"({"id":"p","type":"u32","read":{"address":"0x0","pointer_chain":{)") +
+           GoodPointerChainJson() + R"(},"endian":"big"}})",
+       "must not mix"},
+      {R"({"id":"p","type":"u32","read":{"endian":"big"}})", "either direct"},
+      {PointerValueJson("u32", "", GoodPointerChainJson(), R"(,"endian":"big","extra":true)"),
+       "unknown field"},
+      {PointerValueJson("u32", "", R"("target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+       "base"},
+      {PointerValueJson("u32", "", R"("base":1,"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+       "base must be an object"},
+      {PointerValueJson("u32", "", R"("base":{"address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+       "base.area"},
+      {PointerValueJson("u32", "", R"("base":{"area":"","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+       "base.area"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+       "base.address"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+       "base.address"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":1},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+       "base.address"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860","extra":true},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+       "unknown field"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+       "target_area"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+       "target_area"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":1,"offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+       "target_area must be a string"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","pointer_type":"u32","endian":"big")"),
+       "offsets"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":1,"pointer_type":"u32","endian":"big")"),
+       "offsets must be an array"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":[],"pointer_type":"u32","endian":"big")"),
+       "at least 1"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x0","0x1","0x2","0x3","0x4","0x5","0x6","0x7","0x8","0x9","0xa","0xb","0xc","0xd","0xe","0xf","0x10"],"pointer_type":"u32","endian":"big")"),
+       "at most 16"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":[1],"pointer_type":"u32","endian":"big")"),
+       "offsets[0]"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":[-1],"pointer_type":"u32","endian":"big")"),
+       "offsets[0]"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["16"],"pointer_type":"u32","endian":"big")"),
+       "offsets[0]"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["10"],"pointer_type":"u32","endian":"big")"),
+       "offsets[0]"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0xzz"],"pointer_type":"u32","endian":"big")"),
+       "offsets[0]"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10000000000000000"],"pointer_type":"u32","endian":"big")"),
+       "offsets[0]"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"endian":"big")"),
+       "pointer_type"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u64","endian":"big")"),
+       "pointer_type"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"s32","endian":"big")"),
+       "pointer_type"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"f32","endian":"big")"),
+       "pointer_type"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"banana","endian":"big")"),
+       "pointer_type"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32")"),
+       "pointer_chain.endian"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"native")"),
+       "pointer_chain.endian"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":1)"),
+       "pointer_chain.endian must be a string"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big","extra":true)"),
+       "unknown field"},
+      {PointerValueJson("u16", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")", ""),
+       "read.endian"},
+      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")", ""),
+       "read.endian"},
+      {PointerValueJson("f32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")", ""),
+       "read.endian"},
+      {PointerValueJson("u8", "", GoodPointerChainJson(), R"(,"endian":"big")"), "not valid"},
+      {PointerValueJson("string", R"("bytes":4,)", GoodPointerChainJson(), R"(,"endian":"big")"),
+       "not valid"},
+      {PointerValueJson("string", "", GoodPointerChainJson(), ""), "bytes"},
+      {PointerValueJson("string", R"("bytes":0,)", GoodPointerChainJson(), ""), "bytes"},
+  };
+
+  for (const auto& [value, expected_error] : cases)
+  {
+    std::string error;
+    EXPECT_FALSE(ParseText(PackageJson(value), &error)) << value;
+    EXPECT_NE(error.find(expected_error), std::string::npos) << error << "\n" << value;
+  }
+}
+
 TEST(CheevoMapV2Parser, RejectsNonFiniteIntegerValues)
 {
   const std::vector<picojson::value> invalid_numbers = {
@@ -462,16 +672,13 @@ TEST(CheevoMapV2Planner, BuildsDeterministicGroupedRequestsAndMappings)
   ValueDefinition mem2;
   mem2.id = "mem2_value";
   mem2.type = ValueType::U8;
-  mem2.read.area_id = "mem2";
-  mem2.read.address = 0x20;
+  SetDirectRead(&mem2, "mem2", 0x20);
   package.values.push_back(mem2);
 
   ValueDefinition first = mem2;
   first.id = "first";
   first.type = ValueType::U16;
-  first.read.area_id = "mem1";
-  first.read.address = 0x10;
-  first.read.endian = Endian::Big;
+  SetDirectRead(&first, "mem1", 0x10, Endian::Big);
   package.values.push_back(first);
 
   ValueDefinition duplicate = first;
@@ -495,7 +702,7 @@ TEST(CheevoMapV2Planner, BuildsDeterministicGroupedRequestsAndMappings)
 TEST(CheevoMapV2Planner, RejectsInvalidPlansBeforeMemoryAccess)
 {
   Package package = ValidPackage();
-  package.values.front().read.area_id = "missing";
+  std::get<DirectMemoryRead>(package.values.front().read).area_id = "missing";
 
   FakeDataSource data_source;
   std::string error;
@@ -504,7 +711,7 @@ TEST(CheevoMapV2Planner, RejectsInvalidPlansBeforeMemoryAccess)
   EXPECT_EQ(data_source.grouped_read_count, 0);
 
   package = ValidPackage();
-  package.values.front().read.address = 0x1000;
+  std::get<DirectMemoryRead>(package.values.front().read).address = 0x1000;
   EXPECT_FALSE(EvaluatePackage(package, data_source, &error));
   EXPECT_NE(error.find("outside memory area"), std::string::npos);
   EXPECT_EQ(data_source.grouped_read_count, 0);
@@ -520,9 +727,7 @@ TEST(CheevoMapV2Decoder, DecodesIntegerTypeMatrix)
     ValueDefinition value;
     value.id = std::move(id);
     value.type = type;
-    value.read.area_id = "mem1";
-    value.read.address = address;
-    value.read.endian = endian;
+    SetDirectRead(&value, "mem1", address, endian);
     package.values.push_back(std::move(value));
   };
 
@@ -609,9 +814,7 @@ TEST(CheevoMapV2Decoder, DecodesPrimitiveTypesEndianAndStrings)
     value.id = std::move(id);
     value.type = type;
     value.bytes = bytes;
-    value.read.area_id = "mem1";
-    value.read.address = address;
-    value.read.endian = endian;
+    SetDirectRead(&value, "mem1", address, endian);
     package.values.push_back(std::move(value));
   };
 
@@ -650,7 +853,7 @@ TEST(CheevoMapV2Decoder, KeepsSuccessfulValuesWhenAnotherReadFails)
   Package package = ValidPackage();
   ValueDefinition failed = package.values.front();
   failed.id = "failed";
-  failed.read.address = 0x20;
+  std::get<DirectMemoryRead>(failed.read).address = 0x20;
   package.values.push_back(failed);
 
   FakeDataSource data_source;
@@ -662,6 +865,360 @@ TEST(CheevoMapV2Decoder, KeepsSuccessfulValuesWhenAnotherReadFails)
   ASSERT_TRUE(result) << error;
   EXPECT_EQ(*result->values.at("coins").AsUnsignedInteger(), 0x1234u);
   EXPECT_FALSE(result->values.at("failed").IsAvailable());
+}
+
+TEST(CheevoMapV2PointerRuntime, ResolvesOneOffsetChain)
+{
+  Package package;
+  package.game.id = "GAME01";
+  package.metadata.title = "Test";
+  package.values.push_back(PointerValue("score", ValueType::U32, {0x10}));
+
+  FakeDataSource data_source;
+  WriteU32(&data_source, 0x100, 0x200, Endian::Big);
+  data_source.Write(0x210, {0x12, 0x34, 0x56, 0x78});
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_EQ(*result->values.at("score").AsUnsignedInteger(), 0x12345678u);
+  ASSERT_EQ(data_source.grouped_requests.size(), 2u);
+  EXPECT_EQ(data_source.grouped_requests[0].front().address, 0x100u);
+  EXPECT_EQ(data_source.grouped_requests[1].front().address, 0x210u);
+}
+
+TEST(CheevoMapV2PointerRuntime, ResolvesMultiLevelChainWithGroupedStages)
+{
+  Package package;
+  package.game.id = "GAME01";
+  package.metadata.title = "Test";
+  package.values.push_back(PointerValue("score", ValueType::U16, {0x0, 0x10, 0x20}));
+
+  FakeDataSource data_source;
+  WriteU32(&data_source, 0x100, 0x200, Endian::Big);
+  WriteU32(&data_source, 0x200, 0x300, Endian::Big);
+  WriteU32(&data_source, 0x310, 0x400, Endian::Big);
+  data_source.Write(0x420, {0x12, 0x34});
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_EQ(*result->values.at("score").AsUnsignedInteger(), 0x1234u);
+  ASSERT_EQ(data_source.grouped_requests.size(), 4u);
+  EXPECT_EQ(data_source.grouped_requests[0].front().address, 0x100u);
+  EXPECT_EQ(data_source.grouped_requests[1].front().address, 0x200u);
+  EXPECT_EQ(data_source.grouped_requests[2].front().address, 0x310u);
+  EXPECT_EQ(data_source.grouped_requests[3].front().address, 0x420u);
+}
+
+TEST(CheevoMapV2PointerRuntime, PointerAndFinalEndiannessAreIndependent)
+{
+  Package package;
+  package.game.id = "GAME01";
+  package.metadata.title = "Test";
+  package.values.push_back(
+      PointerValue("score", ValueType::U32, {0x10}, Endian::Little, Endian::Big));
+
+  FakeDataSource data_source;
+  WriteU32(&data_source, 0x100, 0x200, Endian::Little);
+  data_source.Write(0x210, {0x12, 0x34, 0x56, 0x78});
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_EQ(*result->values.at("score").AsUnsignedInteger(), 0x12345678u);
+}
+
+TEST(CheevoMapV2PointerRuntime, DirectAndPointerValuesShareInitialStage)
+{
+  Package package = ValidPackage();
+  package.values.push_back(PointerValue("pointer_score", ValueType::U16, {0x10}));
+
+  FakeDataSource data_source;
+  data_source.Write(0x10, {0x00, 0x07});
+  WriteU32(&data_source, 0x100, 0x200, Endian::Big);
+  data_source.Write(0x210, {0x00, 0x08});
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_EQ(*result->values.at("coins").AsUnsignedInteger(), 7u);
+  EXPECT_EQ(*result->values.at("pointer_score").AsUnsignedInteger(), 8u);
+  ASSERT_EQ(data_source.grouped_requests.size(), 2u);
+  ASSERT_EQ(data_source.grouped_requests[0].size(), 2u);
+  EXPECT_EQ(data_source.grouped_requests[0][0].address, 0x10u);
+  EXPECT_EQ(data_source.grouped_requests[0][1].address, 0x100u);
+}
+
+TEST(CheevoMapV2PointerRuntime, DeduplicatesRootIntermediateAndFinalRequests)
+{
+  Package package;
+  package.game.id = "GAME01";
+  package.metadata.title = "Test";
+  package.values.push_back(PointerValue("as_u32", ValueType::U32, {0x0, 0x10}));
+  package.values.push_back(PointerValue("as_f32", ValueType::F32, {0x0, 0x10}));
+
+  FakeDataSource data_source;
+  WriteU32(&data_source, 0x100, 0x200, Endian::Big);
+  WriteU32(&data_source, 0x200, 0x300, Endian::Big);
+  data_source.Write(0x310, {0x3f, 0x80, 0x00, 0x00});
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_EQ(*result->values.at("as_u32").AsUnsignedInteger(), 0x3f800000u);
+  EXPECT_DOUBLE_EQ(*result->values.at("as_f32").AsFloatingPoint(), 1.0);
+  ASSERT_EQ(data_source.grouped_requests.size(), 3u);
+  EXPECT_EQ(data_source.grouped_requests[0].size(), 1u);
+  EXPECT_EQ(data_source.grouped_requests[1].size(), 1u);
+  EXPECT_EQ(data_source.grouped_requests[2].size(), 1u);
+}
+
+TEST(CheevoMapV2PointerRuntime, ChainsOfDifferentDepthsRemainBatchedByStage)
+{
+  Package package;
+  package.game.id = "GAME01";
+  package.metadata.title = "Test";
+  package.values.push_back(PointerValue("short", ValueType::U8, {0x1}, Endian::Big, Endian::None));
+  package.values.push_back(PointerValue("long", ValueType::U8, {0x0, 0x2}, Endian::Big, Endian::None));
+
+  FakeDataSource data_source;
+  WriteU32(&data_source, 0x100, 0x200, Endian::Big);
+  WriteU32(&data_source, 0x200, 0x300, Endian::Big);
+  data_source.Write(0x201, {0x11});
+  data_source.Write(0x302, {0x22});
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_EQ(*result->values.at("short").AsUnsignedInteger(), 0x11u);
+  EXPECT_EQ(*result->values.at("long").AsUnsignedInteger(), 0x22u);
+  ASSERT_EQ(data_source.grouped_requests.size(), 3u);
+  EXPECT_EQ(data_source.grouped_requests[1].front().address, 0x200u);
+  ASSERT_EQ(data_source.grouped_requests[2].size(), 2u);
+  EXPECT_EQ(data_source.grouped_requests[2][0].address, 0x201u);
+  EXPECT_EQ(data_source.grouped_requests[2][1].address, 0x302u);
+}
+
+TEST(CheevoMapV2PointerRuntime, RuntimeFailuresOnlyMakeAffectedChainUnavailable)
+{
+  Package package = ValidPackage();
+  package.values.push_back(PointerValue("null_root", ValueType::U32, {0x10}));
+  ValueDefinition failed = PointerValue("failed_final", ValueType::U32, {0x20});
+  SetPointerChainRead(&failed, "mem1", 0x104, "mem1", {0x20}, Endian::Big, Endian::Big);
+  package.values.push_back(failed);
+
+  FakeDataSource data_source;
+  data_source.Write(0x10, {0x00, 0x05});
+  WriteU32(&data_source, 0x100, 0x0, Endian::Big);
+  WriteU32(&data_source, 0x104, 0x300, Endian::Big);
+  data_source.failed_addresses.insert(0x320);
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_EQ(*result->values.at("coins").AsUnsignedInteger(), 5u);
+  EXPECT_FALSE(result->values.at("null_root").IsAvailable());
+  EXPECT_FALSE(result->values.at("failed_final").IsAvailable());
+}
+
+TEST(CheevoMapV2PointerRuntime, MultipleTargetAreasAndAdapterFailures)
+{
+  Package package;
+  package.game.id = "GAME01";
+  package.metadata.title = "Test";
+  ValueDefinition mem2_value;
+  mem2_value.id = "mem2_value";
+  mem2_value.type = ValueType::U8;
+  SetPointerChainRead(&mem2_value, "mem1", 0x100, "mem2", {0x4}, Endian::Big, Endian::None);
+  package.values.push_back(mem2_value);
+
+  ValueDefinition adapter_failure;
+  adapter_failure.id = "adapter_failure";
+  adapter_failure.type = ValueType::U8;
+  SetPointerChainRead(&adapter_failure, "mem1", 0x104, "mem1", {0x0}, Endian::Big, Endian::None);
+  package.values.push_back(adapter_failure);
+
+  ValueDefinition wrong_area;
+  wrong_area.id = "wrong_area";
+  wrong_area.type = ValueType::U8;
+  SetPointerChainRead(&wrong_area, "mem1", 0x108, "mem1", {0x0}, Endian::Big, Endian::None);
+  package.values.push_back(wrong_area);
+
+  FakeDataSource data_source;
+  WriteU32(&data_source, 0x100, 0x10000020, Endian::Big);
+  data_source.Write(0x10000024, {0x66});
+  WriteU32(&data_source, 0x104, 0x220, Endian::Big);
+  data_source.failed_pointer_resolutions.insert(0x220);
+  WriteU32(&data_source, 0x108, 0x10000030, Endian::Big);
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_EQ(*result->values.at("mem2_value").AsUnsignedInteger(), 0x66u);
+  EXPECT_FALSE(result->values.at("adapter_failure").IsAvailable());
+  EXPECT_FALSE(result->values.at("wrong_area").IsAvailable());
+}
+
+TEST(CheevoMapV2PointerRuntime, IntermediateFailuresOnlyMakeAffectedChainUnavailable)
+{
+  Package package;
+  package.game.id = "GAME01";
+  package.metadata.title = "Test";
+  package.values.push_back(PointerValue("bad", ValueType::U8, {0x0, 0x1}, Endian::Big, Endian::None));
+  ValueDefinition good = PointerValue("good", ValueType::U8, {0x2}, Endian::Big, Endian::None);
+  SetPointerChainRead(&good, "mem1", 0x104, "mem1", {0x2}, Endian::Big, Endian::None);
+  package.values.push_back(good);
+
+  FakeDataSource data_source;
+  WriteU32(&data_source, 0x100, 0x200, Endian::Big);
+  WriteU32(&data_source, 0x104, 0x300, Endian::Big);
+  data_source.failed_addresses.insert(0x200);
+  data_source.Write(0x302, {0x44});
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_FALSE(result->values.at("bad").IsAvailable());
+  EXPECT_EQ(*result->values.at("good").AsUnsignedInteger(), 0x44u);
+}
+
+TEST(CheevoMapV2PointerRuntime, OverflowAndBoundaryFailuresBecomeUnavailable)
+{
+  Package package;
+  package.game.id = "GAME01";
+  package.metadata.title = "Test";
+  package.values.push_back(PointerValue("overflow", ValueType::U8,
+                                        {std::numeric_limits<u64>::max()}, Endian::Big,
+                                        Endian::None));
+  ValueDefinition boundary = PointerValue("boundary", ValueType::U16, {0xfff});
+  SetPointerChainRead(&boundary, "mem1", 0x104, "mem1", {0xfff}, Endian::Big, Endian::Big);
+  package.values.push_back(boundary);
+
+  FakeDataSource data_source;
+  WriteU32(&data_source, 0x100, 0x10, Endian::Big);
+  WriteU32(&data_source, 0x104, 0x1, Endian::Big);
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_FALSE(result->values.at("overflow").IsAvailable());
+  EXPECT_FALSE(result->values.at("boundary").IsAvailable());
+}
+
+TEST(CheevoMapV2PointerRuntime, StaticPointerPlanFailuresPreventMemoryReads)
+{
+  Package package;
+  package.game.id = "GAME01";
+  package.metadata.title = "Test";
+  ValueDefinition value = PointerValue("score", ValueType::U32, {0x10});
+  std::get<PointerChainRead>(value.read).base.area_id = "missing";
+  package.values.push_back(value);
+
+  FakeDataSource data_source;
+  std::string error;
+  EXPECT_FALSE(EvaluatePackage(package, data_source, &error));
+  EXPECT_NE(error.find("unknown pointer_chain.base area"), std::string::npos);
+  EXPECT_EQ(data_source.grouped_read_count, 0);
+
+  package.values.front() = PointerValue("score", ValueType::U32, {0x10});
+  std::get<PointerChainRead>(package.values.front().read).target_area_id = "missing";
+  EXPECT_FALSE(EvaluatePackage(package, data_source, &error));
+  EXPECT_NE(error.find("unknown pointer_chain.target_area"), std::string::npos);
+  EXPECT_EQ(data_source.grouped_read_count, 0);
+}
+
+TEST(CheevoMapV2PointerRuntime, DirectOnlyStillMakesExactlyOneGroupedRead)
+{
+  Package package = ValidPackage();
+  FakeDataSource data_source;
+  data_source.Write(0x10, {0x12, 0x34});
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_EQ(*result->values.at("coins").AsUnsignedInteger(), 0x1234u);
+  EXPECT_EQ(data_source.grouped_read_count, 1);
+  EXPECT_EQ(data_source.single_read_count, 0);
+}
+
+TEST(CheevoMapV2PointerRuntimeState, PublishesPointerAvailabilityDeltas)
+{
+  Package package;
+  package.game.id = "GAME01";
+  package.metadata.title = "Test";
+  package.values.push_back(PointerValue("score", ValueType::U32, {0x10}));
+
+  FakeDataSource data_source;
+  WriteU32(&data_source, 0x100, 0x200, Endian::Big);
+  data_source.Write(0x210, {0x00, 0x00, 0x00, 0x01});
+
+  StateStore store;
+  std::vector<StateUpdate> updates;
+  auto hook = store.RegisterUpdateCallback(
+      [&updates](const StateUpdate& update) { updates.push_back(update); });
+  (void)hook;
+
+  const StateUpdate reset = store.Reset({{"score", StateValue::Unavailable()}});
+  std::string error;
+  auto applied = EvaluatePackageForSession(package, data_source, store, reset.session_id, &error);
+  EXPECT_EQ(applied.status, PackageRuntimeStatus::Applied);
+  ASSERT_EQ(updates.size(), 2u);
+  EXPECT_EQ(*updates.back().values.at("score").AsUnsignedInteger(), 1u);
+
+  data_source.Write(0x210, {0x00, 0x00, 0x00, 0x02});
+  applied = EvaluatePackageForSession(package, data_source, store, reset.session_id, &error);
+  EXPECT_EQ(applied.status, PackageRuntimeStatus::Applied);
+  ASSERT_EQ(updates.size(), 3u);
+  EXPECT_EQ(*updates.back().values.at("score").AsUnsignedInteger(), 2u);
+
+  data_source.failed_addresses.insert(0x210);
+  applied = EvaluatePackageForSession(package, data_source, store, reset.session_id, &error);
+  EXPECT_EQ(applied.status, PackageRuntimeStatus::Applied);
+  ASSERT_EQ(updates.size(), 4u);
+  EXPECT_FALSE(updates.back().values.at("score").IsAvailable());
+
+  data_source.failed_addresses.clear();
+  applied = EvaluatePackageForSession(package, data_source, store, reset.session_id, &error);
+  EXPECT_EQ(applied.status, PackageRuntimeStatus::Applied);
+  ASSERT_EQ(updates.size(), 5u);
+  EXPECT_EQ(*updates.back().values.at("score").AsUnsignedInteger(), 2u);
+}
+
+TEST(CheevoMapDolphinPointerNormalization, ResolvesPhysicalAndPowerPcAliases)
+{
+  const auto mem1_physical = ResolveDolphinPointerAddress("mem1", 0x00000010);
+  ASSERT_TRUE(mem1_physical.success);
+  EXPECT_EQ(mem1_physical.address, 0x10u);
+
+  const auto mem2_physical = ResolveDolphinPointerAddress("mem2", 0x10000010);
+  ASSERT_TRUE(mem2_physical.success);
+  EXPECT_EQ(mem2_physical.address, 0x10000010u);
+
+  EXPECT_EQ(ResolveDolphinPointerAddress("mem1", 0x80000010).address, 0x10u);
+  EXPECT_EQ(ResolveDolphinPointerAddress("mem2", 0x90000010).address, 0x10000010u);
+  EXPECT_EQ(ResolveDolphinPointerAddress("mem1", 0xc0000010).address, 0x10u);
+  EXPECT_EQ(ResolveDolphinPointerAddress("mem2", 0xd0000010).address, 0x10000010u);
+}
+
+TEST(CheevoMapDolphinPointerNormalization, RejectsInvalidAndWrongAreaPointers)
+{
+  EXPECT_FALSE(ResolveDolphinPointerAddress("mem1", 0).success);
+  EXPECT_FALSE(ResolveDolphinPointerAddress("mem1", 0x80000000).success);
+  EXPECT_FALSE(ResolveDolphinPointerAddress("mem1", 0x90000010).success);
+  EXPECT_FALSE(ResolveDolphinPointerAddress("mem2", 0x80000010).success);
+  EXPECT_FALSE(ResolveDolphinPointerAddress("mem1", 0x04000000).success);
+  EXPECT_FALSE(ResolveDolphinPointerAddress("mem2", 0x14000000).success);
+
+  const auto mem1_boundary = ResolveDolphinPointerAddress("mem1", 0x03ffffff);
+  ASSERT_TRUE(mem1_boundary.success);
+  EXPECT_EQ(mem1_boundary.address, 0x03ffffffu);
+  EXPECT_FALSE(ResolveDolphinPointerAddress("mem1", 0x04000000).success);
+
+  const auto mem2_boundary = ResolveDolphinPointerAddress("mem2", 0x13ffffff);
+  ASSERT_TRUE(mem2_boundary.success);
+  EXPECT_EQ(mem2_boundary.address, 0x13ffffffu);
+  EXPECT_FALSE(ResolveDolphinPointerAddress("mem2", 0x14000000).success);
 }
 
 TEST(CheevoMapV2RuntimeState, PublishesDeltasAndRejectsStaleSessions)
@@ -706,7 +1263,7 @@ TEST(CheevoMapV2RuntimeState, PublishesDeltasAndRejectsStaleSessions)
 TEST(CheevoMapV2RuntimeState, EvaluationFailureIsDistinctFromNoChanges)
 {
   Package package = ValidPackage();
-  package.values.front().read.area_id = "missing";
+  std::get<DirectMemoryRead>(package.values.front().read).area_id = "missing";
 
   FakeDataSource data_source;
   StateStore store;
