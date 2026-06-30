@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 
+#include "Core/CheevoMap/V2/DashboardProtocol.h"
 #include "DolphinQt/CheevoMap/CheevoMapV2LocalDashboardProtocol.h"
 
 namespace CheevoMap::LocalDashboard
@@ -24,10 +25,21 @@ public:
 
   struct Options
   {
-    std::string bind_address = std::string(kBindAddress);
     std::uint16_t port = kPort;
     int select_timeout_ms = 50;
     int keepalive_interval_ms = 15000;
+  };
+
+  struct SerializedSnapshot
+  {
+    CheevoMap::V2::StateCursor cursor;
+    std::string json;
+  };
+
+  struct SerializedUpdate
+  {
+    CheevoMap::V2::StateCursor cursor;
+    std::string json;
   };
 
   LocalDashboardServer();
@@ -36,12 +48,15 @@ public:
   LocalDashboardServer(const LocalDashboardServer&) = delete;
   LocalDashboardServer& operator=(const LocalDashboardServer&) = delete;
 
-  bool Start(Options options, Assets assets, std::string snapshot_json, std::string* error);
+  bool Start(Options options, Assets assets, SerializedSnapshot initial_snapshot,
+             std::string* error);
   void Stop();
   bool IsRunning() const;
   std::uint16_t GetBoundPort() const;
+  std::uint32_t GetBoundIPv4AddressForTesting() const;
 
-  void PublishSnapshotAndUpdate(std::string snapshot_json, std::optional<std::string> update_json);
+  void PublishSnapshotAndUpdate(SerializedSnapshot snapshot,
+                                std::optional<SerializedUpdate> update);
 
 private:
   struct Impl;

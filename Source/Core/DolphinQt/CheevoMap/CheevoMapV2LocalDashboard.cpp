@@ -3,6 +3,7 @@
 
 #include "DolphinQt/CheevoMap/CheevoMapV2LocalDashboard.h"
 
+#include <optional>
 #include <utility>
 
 #include <QDesktopServices>
@@ -39,22 +40,17 @@ bool LoadAssets(CheevoMap::LocalDashboard::LocalDashboardServer::Assets* assets,
          ReadResource(":/cheevomap-v2-dashboard/Dashboard/style.css", &assets->stylesheet, error);
 }
 
-void ApplyUpdateToSnapshot(CheevoMap::V2::StateSnapshot* snapshot,
-                           const CheevoMap::V2::StateUpdate& update)
+CheevoMap::LocalDashboard::LocalDashboardServer::SerializedSnapshot
+SerializeSnapshot(const CheevoMap::V2::StateSnapshot& snapshot)
 {
-  snapshot->session_id = update.session_id;
-  snapshot->sequence = update.sequence;
+  return {CheevoMap::V2::CursorForSnapshot(snapshot),
+          CheevoMap::V2::SerializeStateSnapshot(snapshot)};
+}
 
-  if (update.full)
-  {
-    snapshot->values = update.values;
-    return;
-  }
-
-  for (const std::string& id : update.removed)
-    snapshot->values.erase(id);
-  for (const auto& [id, value] : update.values)
-    snapshot->values[id] = value;
+CheevoMap::LocalDashboard::LocalDashboardServer::SerializedUpdate
+SerializeUpdate(const CheevoMap::V2::StateUpdate& update)
+{
+  return {CheevoMap::V2::CursorForUpdate(update), CheevoMap::V2::SerializeStateUpdate(update)};
 }
 }  // namespace
 
@@ -76,20 +72,22 @@ bool CheevoMapV2LocalDashboard::Start(std::string* error)
   if (!LoadAssets(&assets, error))
     return false;
 
-  m_snapshot = CheevoMap::Manager::GetInstance().GetV2StateSnapshot();
+  Common::EventHook event_hook = CheevoMap::Manager::GetInstance().RegisterV2StateUpdatedCallback(
+      [this](const CheevoMap::V2::StateUpdate& update) {
+        QueueOnObject(this, [this, update] { OnStateUpdate(update); });
+      });
+
+  CheevoMap::V2::StateSnapshot snapshot = CheevoMap::Manager::GetInstance().GetV2StateSnapshot();
 
   auto server = std::make_unique<CheevoMap::LocalDashboard::LocalDashboardServer>();
-  if (!server->Start({}, std::move(assets), CheevoMap::V2::SerializeStateSnapshot(m_snapshot),
-                     error))
+  if (!server->Start({}, std::move(assets), SerializeSnapshot(snapshot), error))
   {
     return false;
   }
 
+  m_snapshot = std::move(snapshot);
   m_server = std::move(server);
-  m_event_hook = CheevoMap::Manager::GetInstance().RegisterV2StateUpdatedCallback(
-      [this](const CheevoMap::V2::StateUpdate& update) {
-        QueueOnObject(this, [this, update] { OnStateUpdate(update); });
-      });
+  m_event_hook = std::move(event_hook);
 
   QDesktopServices::openUrl(QUrl(QStringLiteral("http://127.0.0.1:32123/")));
   return true;
@@ -115,7 +113,17 @@ void CheevoMapV2LocalDashboard::OnStateUpdate(CheevoMap::V2::StateUpdate update)
   if (!IsRunning())
     return;
 
-  ApplyUpdateToSnapshot(&m_snapshot, update);
-  m_server->PublishSnapshotAndUpdate(CheevoMap::V2::SerializeStateSnapshot(m_snapshot),
-                                     CheevoMap::V2::SerializeStateUpdate(update));
+  const CheevoMap::V2::StateUpdateApplyResult result =
+      CheevoMap::V2::ApplyStateUpdateToSnapshot(&m_snapshot, update);
+  if (result == CheevoMap::V2::StateUpdateApplyResult::StaleOrDuplicate)
+    return;
+
+  if (result == CheevoMap::V2::StateUpdateApplyResult::InvalidSessionTransition)
+  {
+    m_snapshot = CheevoMap::Manager::GetInstance().GetV2StateSnapshot();
+    m_server->PublishSnapshotAndUpdate(SerializeSnapshot(m_snapshot), std::nullopt);
+    return;
+  }
+
+  m_server->PublishSnapshotAndUpdate(SerializeSnapshot(m_snapshot), SerializeUpdate(update));
 }

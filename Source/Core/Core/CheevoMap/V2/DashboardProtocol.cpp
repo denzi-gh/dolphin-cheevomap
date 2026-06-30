@@ -3,6 +3,8 @@
 
 #include "Core/CheevoMap/V2/DashboardProtocol.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <string>
 #include <utility>
@@ -100,6 +102,78 @@ std::string Serialize(const picojson::object& object)
 std::string SerializeStateValue(const StateValue& value)
 {
   return StateValueToJson(value).serialize(false);
+}
+
+StateCursor CursorForSnapshot(const StateSnapshot& snapshot)
+{
+  return StateCursor{snapshot.session_id, snapshot.sequence};
+}
+
+StateCursor CursorForUpdate(const StateUpdate& update)
+{
+  return StateCursor{update.session_id, update.sequence};
+}
+
+bool IsCursorNewer(const StateCursor candidate, const StateCursor current)
+{
+  return candidate.session_id > current.session_id ||
+         (candidate.session_id == current.session_id && candidate.sequence > current.sequence);
+}
+
+StateUpdateApplyResult ApplyStateUpdateToSnapshot(StateSnapshot* snapshot,
+                                                  const StateUpdate& update)
+{
+  if (update.session_id < snapshot->session_id)
+    return StateUpdateApplyResult::StaleOrDuplicate;
+
+  if (update.session_id == snapshot->session_id && update.sequence <= snapshot->sequence)
+    return StateUpdateApplyResult::StaleOrDuplicate;
+
+  if (update.session_id > snapshot->session_id && !update.full)
+    return StateUpdateApplyResult::InvalidSessionTransition;
+
+  snapshot->session_id = update.session_id;
+  snapshot->sequence = update.sequence;
+
+  if (update.full)
+  {
+    snapshot->values = update.values;
+    return StateUpdateApplyResult::Applied;
+  }
+
+  for (const std::string& id : update.removed)
+    snapshot->values.erase(id);
+  for (const auto& [id, value] : update.values)
+    snapshot->values[id] = value;
+
+  return StateUpdateApplyResult::Applied;
+}
+
+bool IsUnsignedDecimalString(const std::string_view value)
+{
+  return !value.empty() &&
+         std::ranges::all_of(value, [](const unsigned char c) { return std::isdigit(c) != 0; });
+}
+
+int CompareUnsignedDecimalStrings(std::string_view left, std::string_view right)
+{
+  if (!IsUnsignedDecimalString(left) || !IsUnsignedDecimalString(right))
+    return 0;
+
+  while (left.size() > 1 && left.front() == '0')
+    left.remove_prefix(1);
+  while (right.size() > 1 && right.front() == '0')
+    right.remove_prefix(1);
+
+  if (left.size() < right.size())
+    return -1;
+  if (left.size() > right.size())
+    return 1;
+  if (left < right)
+    return -1;
+  if (left > right)
+    return 1;
+  return 0;
 }
 
 std::string SerializeStateSnapshot(const StateSnapshot& snapshot)

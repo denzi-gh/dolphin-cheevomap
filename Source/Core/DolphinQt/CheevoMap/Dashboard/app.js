@@ -6,6 +6,7 @@ const state = {
   protocolVersion: "-",
   sessionId: "0",
   sequence: "0",
+  hasCursor: false,
   values: new Map(),
   rows: new Map(),
   filter: "",
@@ -30,10 +31,64 @@ function setConnection(label, className) {
 
 function validateMessage(message) {
   if (!message || message.protocol_version !== PROTOCOL_VERSION) {
-    setConnection("Unsupported protocol", "error");
+    setProtocolError("Unsupported protocol.");
     return false;
   }
   return true;
+}
+
+function setProtocolError(message) {
+  setConnection("Protocol error", "error");
+  els.message.textContent = message;
+  els.message.hidden = false;
+}
+
+function isCanonicalUnsignedDecimal(value) {
+  return typeof value === "string" && /^[0-9]+$/.test(value);
+}
+
+function normalizeUnsignedDecimalString(value) {
+  let offset = 0;
+  while (offset + 1 < value.length && value[offset] === "0")
+    offset += 1;
+  return value.slice(offset);
+}
+
+function compareUnsignedDecimalStrings(left, right) {
+  if (!isCanonicalUnsignedDecimal(left) || !isCanonicalUnsignedDecimal(right))
+    throw new Error("Malformed cursor.");
+
+  const normalizedLeft = normalizeUnsignedDecimalString(left);
+  const normalizedRight = normalizeUnsignedDecimalString(right);
+  if (normalizedLeft.length < normalizedRight.length)
+    return -1;
+  if (normalizedLeft.length > normalizedRight.length)
+    return 1;
+  if (normalizedLeft < normalizedRight)
+    return -1;
+  if (normalizedLeft > normalizedRight)
+    return 1;
+  return 0;
+}
+
+function compareCursor(leftSession, leftSequence, rightSession, rightSequence) {
+  const sessionCompare = compareUnsignedDecimalStrings(leftSession, rightSession);
+  if (sessionCompare !== 0)
+    return sessionCompare;
+  return compareUnsignedDecimalStrings(leftSequence, rightSequence);
+}
+
+function validateCursor(message) {
+  if (!isCanonicalUnsignedDecimal(message.session_id) ||
+      !isCanonicalUnsignedDecimal(message.sequence)) {
+    setProtocolError("Malformed state cursor.");
+    return null;
+  }
+
+  return {
+    sessionId: message.session_id,
+    sequence: message.sequence,
+  };
 }
 
 function formatValue(value) {
@@ -134,9 +189,19 @@ function replaceValues(values) {
 function applySnapshot(message) {
   if (!validateMessage(message))
     return;
+  const cursor = validateCursor(message);
+  if (!cursor)
+    return;
+
+  if (state.hasCursor &&
+      compareCursor(cursor.sessionId, cursor.sequence, state.sessionId, state.sequence) < 0) {
+    return;
+  }
+
   state.protocolVersion = String(message.protocol_version);
-  state.sessionId = String(message.session_id);
-  state.sequence = String(message.sequence);
+  state.sessionId = cursor.sessionId;
+  state.sequence = cursor.sequence;
+  state.hasCursor = true;
   replaceValues(message.values);
   updateSummary();
 }
@@ -144,9 +209,37 @@ function applySnapshot(message) {
 function applyUpdate(message) {
   if (!validateMessage(message))
     return;
+  const cursor = validateCursor(message);
+  if (!cursor)
+    return;
+
+  if (state.hasCursor) {
+    const sessionCompare = compareUnsignedDecimalStrings(cursor.sessionId, state.sessionId);
+    if (sessionCompare < 0)
+      return;
+    if (sessionCompare === 0 &&
+        compareUnsignedDecimalStrings(cursor.sequence, state.sequence) <= 0) {
+      return;
+    }
+    if (sessionCompare > 0 && !message.full) {
+      setConnection("Resynchronizing", "reconnecting");
+      els.message.textContent = "Resynchronizing dashboard state.";
+      els.message.hidden = false;
+      fetchSnapshot();
+      return;
+    }
+  } else if (!message.full) {
+    setConnection("Resynchronizing", "reconnecting");
+    els.message.textContent = "Resynchronizing dashboard state.";
+    els.message.hidden = false;
+    fetchSnapshot();
+    return;
+  }
+
   state.protocolVersion = String(message.protocol_version);
-  state.sessionId = String(message.session_id);
-  state.sequence = String(message.sequence);
+  state.sessionId = cursor.sessionId;
+  state.sequence = cursor.sequence;
+  state.hasCursor = true;
 
   if (message.full) {
     replaceValues(message.values);
@@ -173,10 +266,13 @@ function applyUpdate(message) {
 async function fetchSnapshot() {
   try {
     const response = await fetch("/api/v1/snapshot", {cache: "no-store"});
-    if (!response.ok)
+    if (!response.ok) {
+      setConnection("Snapshot failed", "error");
       return;
+    }
     applySnapshot(await response.json());
   } catch (_) {
+    setConnection("Snapshot failed", "error");
   }
 }
 
@@ -191,12 +287,22 @@ function connectEvents() {
     setConnection("Connected", "connected");
   });
   state.eventSource.addEventListener("snapshot", event => {
-    applySnapshot(JSON.parse(event.data));
-    setConnection("Connected", "connected");
+    try {
+      applySnapshot(JSON.parse(event.data));
+      setConnection("Connected", "connected");
+    } catch (_) {
+      setProtocolError("Malformed snapshot message.");
+    }
   });
   state.eventSource.addEventListener("update", event => {
-    applyUpdate(JSON.parse(event.data));
-    setConnection("Connected", "connected");
+    try {
+      applyUpdate(JSON.parse(event.data));
+      if (els.connection.className !== "status error" &&
+          els.connection.textContent !== "Resynchronizing")
+        setConnection("Connected", "connected");
+    } catch (_) {
+      setProtocolError("Malformed update message.");
+    }
   });
   state.eventSource.addEventListener("error", () => {
     setConnection("Reconnecting", "reconnecting");

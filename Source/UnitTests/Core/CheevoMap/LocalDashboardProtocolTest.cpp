@@ -13,6 +13,7 @@
 
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <cstdint>
 #include <locale>
 #include <optional>
@@ -37,6 +38,7 @@ using CheevoMap::LocalDashboard::LocalDashboardServer;
 using CheevoMap::LocalDashboard::ParseHttpRequest;
 using CheevoMap::LocalDashboard::ParseStatus;
 using CheevoMap::LocalDashboard::Route;
+using CheevoMap::V2::StateCursor;
 
 #ifdef _WIN32
 using NativeSocket = SOCKET;
@@ -145,6 +147,21 @@ std::string ReceiveUntilContains(NativeSocket socket, std::string_view needle)
   return response;
 }
 
+std::string ReceiveFor(NativeSocket socket, std::chrono::milliseconds duration)
+{
+  const auto deadline = std::chrono::steady_clock::now() + duration;
+  std::string response;
+  std::array<char, 4096> buffer;
+  while (std::chrono::steady_clock::now() < deadline)
+  {
+    const int received = recv(socket, buffer.data(), static_cast<int>(buffer.size()), 0);
+    if (received <= 0)
+      return response;
+    response.append(buffer.data(), static_cast<size_t>(received));
+  }
+  return response;
+}
+
 std::string RequestFromServer(const std::uint16_t port, std::string_view request)
 {
   Common::SocketContext socket_context;
@@ -177,12 +194,34 @@ LocalDashboardServer::Options TestOptions()
   return options;
 }
 
+LocalDashboardServer::SerializedSnapshot
+TestSnapshot(std::uint64_t session_id, std::uint64_t sequence, std::string extra_json = "")
+{
+  if (!extra_json.empty() && extra_json.front() != ',')
+    extra_json.insert(extra_json.begin(), ',');
+  return {.cursor = StateCursor{session_id, sequence},
+          .json = "{\"message_type\":\"snapshot\",\"session_id\":\"" + std::to_string(session_id) +
+                  "\",\"sequence\":\"" + std::to_string(sequence) + "\"" + extra_json + "}"};
+}
+
+LocalDashboardServer::SerializedUpdate TestUpdate(std::uint64_t session_id, std::uint64_t sequence,
+                                                  bool full = false, std::string extra_json = "")
+{
+  if (!extra_json.empty() && extra_json.front() != ',')
+    extra_json.insert(extra_json.begin(), ',');
+  return {.cursor = StateCursor{session_id, sequence},
+          .json = "{\"message_type\":\"update\",\"session_id\":\"" + std::to_string(session_id) +
+                  "\",\"sequence\":\"" + std::to_string(sequence) +
+                  "\",\"full\":" + (full ? "true" : "false") + extra_json + "}"};
+}
+
 void ExpectSingleContentLengthResponse(const std::string& response)
 {
   const size_t header_end = response.find("\r\n\r\n");
   ASSERT_NE(header_end, std::string::npos) << response;
   const std::string_view headers(response.data(), header_end);
   EXPECT_EQ(CountSubstring(std::string(headers), "Content-Length:"), 1u) << response;
+  EXPECT_EQ(CountSubstring(std::string(headers), "Content-Type:"), 1u) << response;
   EXPECT_EQ(CountSubstring(std::string(headers), "Connection: close"), 1u) << response;
 
   const std::string_view marker = "Content-Length: ";
@@ -194,6 +233,11 @@ void ExpectSingleContentLengthResponse(const std::string& response)
 
   size_t expected_length = 0;
   const std::string_view number = headers.substr(number_start, number_end - number_start);
+  EXPECT_FALSE(number.empty());
+  for (const char c : number)
+    EXPECT_GE(c, '0') << response;
+  for (const char c : number)
+    EXPECT_LE(c, '9') << response;
   const auto [ptr, error] =
       std::from_chars(number.data(), number.data() + number.size(), expected_length);
   ASSERT_EQ(error, std::errc{});
@@ -337,14 +381,14 @@ TEST(CheevoMapV2LocalDashboardProtocol, ResponseBuilderFormatsContentLengthWitho
 
   EXPECT_NE(response.find("Content-Length: 1391\r\n"), std::string::npos);
   EXPECT_EQ(response.find("Content-Length: 1,391\r\n"), std::string::npos);
+  EXPECT_EQ(response.find("Content-Length: 1.391\r\n"), std::string::npos);
   ExpectSingleContentLengthResponse(response);
 }
 
 TEST(CheevoMapV2LocalDashboardProtocol, NativeServerServesOrdinaryRoutesWithSingleLength)
 {
   LocalDashboardServer server;
-  ASSERT_TRUE(
-      server.Start(TestOptions(), TestAssets(), "{\"message_type\":\"snapshot\"}", nullptr));
+  ASSERT_TRUE(server.Start(TestOptions(), TestAssets(), TestSnapshot(1, 1), nullptr));
 
   const std::vector<std::pair<std::string, std::string>> routes = {
       {"/", "<!doctype html>"},
@@ -367,7 +411,7 @@ TEST(CheevoMapV2LocalDashboardProtocol, NativeServerServesOrdinaryRoutesWithSing
 TEST(CheevoMapV2LocalDashboardProtocol, NativeServerReturnsErrorsWithoutDuplicateLength)
 {
   LocalDashboardServer server;
-  ASSERT_TRUE(server.Start(TestOptions(), TestAssets(), "{}", nullptr));
+  ASSERT_TRUE(server.Start(TestOptions(), TestAssets(), TestSnapshot(1, 1), nullptr));
 
   std::string response =
       RequestFromServer(server.GetBoundPort(), "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
@@ -389,9 +433,9 @@ TEST(CheevoMapV2LocalDashboardProtocol, NativeServerReturnsErrorsWithoutDuplicat
 TEST(CheevoMapV2LocalDashboardProtocol, NativeServerHandlesRepeatedBrowserLikeRequests)
 {
   LocalDashboardServer server;
-  ASSERT_TRUE(server.Start(TestOptions(), TestAssets(), "{}", nullptr));
+  ASSERT_TRUE(server.Start(TestOptions(), TestAssets(), TestSnapshot(1, 1), nullptr));
 
-  for (int i = 0; i < 8; ++i)
+  for (int i = 0; i < 100; ++i)
   {
     const std::string response = RequestFromServer(
         server.GetBoundPort(),
@@ -401,12 +445,46 @@ TEST(CheevoMapV2LocalDashboardProtocol, NativeServerHandlesRepeatedBrowserLikeRe
   }
 }
 
+TEST(CheevoMapV2LocalDashboardProtocol, NativeServerBindsIPv4Loopback)
+{
+  LocalDashboardServer server;
+  ASSERT_TRUE(server.Start(TestOptions(), TestAssets(), TestSnapshot(1, 1), nullptr));
+
+  EXPECT_EQ(server.GetBoundIPv4AddressForTesting(), htonl(INADDR_LOOPBACK));
+}
+
+TEST(CheevoMapV2LocalDashboardProtocol, NativeServerStartStopRestartAndBindConflict)
+{
+  LocalDashboardServer server;
+  ASSERT_TRUE(server.Start(TestOptions(), TestAssets(), TestSnapshot(1, 1), nullptr));
+  const std::uint16_t port = server.GetBoundPort();
+  EXPECT_NE(port, 0);
+  server.Stop();
+
+  LocalDashboardServer::Options restart_options = TestOptions();
+  restart_options.port = port;
+  ASSERT_TRUE(server.Start(restart_options, TestAssets(), TestSnapshot(1, 2), nullptr));
+  server.Stop();
+
+  LocalDashboardServer first;
+  ASSERT_TRUE(first.Start(restart_options, TestAssets(), TestSnapshot(1, 3), nullptr));
+
+  LocalDashboardServer second;
+  std::string error;
+  EXPECT_FALSE(second.Start(restart_options, TestAssets(), TestSnapshot(1, 4), &error));
+  EXPECT_NE(error.find("bind failed:"), std::string::npos) << error;
+
+  first.Stop();
+
+  LocalDashboardServer third;
+  EXPECT_TRUE(third.Start(restart_options, TestAssets(), TestSnapshot(1, 5), nullptr));
+}
+
 TEST(CheevoMapV2LocalDashboardProtocol, NativeServerStreamsSseSnapshotUpdatesAndKeepalive)
 {
   Common::SocketContext socket_context;
   LocalDashboardServer server;
-  ASSERT_TRUE(
-      server.Start(TestOptions(), TestAssets(), "{\"message_type\":\"snapshot\"}", nullptr));
+  ASSERT_TRUE(server.Start(TestOptions(), TestAssets(), TestSnapshot(1, 1), nullptr));
 
   NativeSocket socket = ConnectToServer(server.GetBoundPort());
   ASSERT_NE(socket, INVALID_NATIVE_SOCKET);
@@ -418,20 +496,140 @@ TEST(CheevoMapV2LocalDashboardProtocol, NativeServerStreamsSseSnapshotUpdatesAnd
   EXPECT_EQ(headers.find("Content-Length"), std::string::npos) << response;
   EXPECT_NE(response.find("Content-Type: text/event-stream; charset=utf-8\r\n"), std::string::npos)
       << response;
-  EXPECT_NE(response.find("event: snapshot\ndata: {\"message_type\":\"snapshot\"}\n\n"),
-            std::string::npos)
-      << response;
+  EXPECT_NE(response.find("event: snapshot\n"), std::string::npos) << response;
+  EXPECT_NE(response.find("\"session_id\":\"1\""), std::string::npos) << response;
+  EXPECT_NE(response.find("\"sequence\":\"1\""), std::string::npos) << response;
 
-  server.PublishSnapshotAndUpdate("{\"message_type\":\"snapshot\",\"sequence\":\"2\"}",
-                                  "{\"message_type\":\"update\",\"sequence\":\"2\"}");
+  server.PublishSnapshotAndUpdate(TestSnapshot(1, 2), TestUpdate(1, 2));
   response += ReceiveUntilContains(socket, "event: update\n");
-  EXPECT_NE(
-      response.find("event: update\ndata: {\"message_type\":\"update\",\"sequence\":\"2\"}\n\n"),
-      std::string::npos)
-      << response;
+  EXPECT_NE(response.find("event: update\n"), std::string::npos) << response;
+  EXPECT_NE(response.find("\"sequence\":\"2\""), std::string::npos) << response;
 
   response += ReceiveUntilContains(socket, ": keepalive\n\n");
   EXPECT_NE(response.find(": keepalive\n\n"), std::string::npos) << response;
+
+  CloseSocket(socket);
+}
+
+TEST(CheevoMapV2LocalDashboardProtocol, NativeServerDoesNotSendStaleOrDuplicateSseUpdates)
+{
+  Common::SocketContext socket_context;
+  LocalDashboardServer server;
+  ASSERT_TRUE(server.Start(TestOptions(), TestAssets(), TestSnapshot(1, 10), nullptr));
+
+  NativeSocket socket = ConnectToServer(server.GetBoundPort());
+  ASSERT_NE(socket, INVALID_NATIVE_SOCKET);
+  ASSERT_TRUE(SendAll(socket, "GET /api/v1/events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"));
+  std::string response = ReceiveUntilContains(socket, "\"sequence\":\"10\"");
+  ASSERT_NE(response.find("event: snapshot\n"), std::string::npos) << response;
+
+  server.PublishSnapshotAndUpdate(TestSnapshot(1, 10), TestUpdate(1, 9));
+  server.PublishSnapshotAndUpdate(TestSnapshot(1, 10), TestUpdate(1, 10));
+  response = ReceiveFor(socket, std::chrono::milliseconds(250));
+  EXPECT_EQ(response.find("event: update\n"), std::string::npos) << response;
+
+  CloseSocket(socket);
+}
+
+TEST(CheevoMapV2LocalDashboardProtocol, NativeServerSendsNewerUpdatesToExistingClients)
+{
+  Common::SocketContext socket_context;
+  LocalDashboardServer server;
+  ASSERT_TRUE(server.Start(TestOptions(), TestAssets(), TestSnapshot(1, 8), nullptr));
+
+  NativeSocket socket = ConnectToServer(server.GetBoundPort());
+  ASSERT_NE(socket, INVALID_NATIVE_SOCKET);
+  ASSERT_TRUE(SendAll(socket, "GET /api/v1/events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"));
+  ASSERT_NE(ReceiveUntilContains(socket, "\"sequence\":\"8\"").find("event: snapshot\n"),
+            std::string::npos);
+
+  server.PublishSnapshotAndUpdate(TestSnapshot(1, 10), TestUpdate(1, 9));
+  const std::string response = ReceiveUntilContains(socket, "\"sequence\":\"9\"");
+  EXPECT_NE(response.find("event: update\n"), std::string::npos) << response;
+
+  CloseSocket(socket);
+}
+
+TEST(CheevoMapV2LocalDashboardProtocol, NativeServerSendsNewSessionFullUpdate)
+{
+  Common::SocketContext socket_context;
+  LocalDashboardServer server;
+  ASSERT_TRUE(server.Start(TestOptions(), TestAssets(), TestSnapshot(1, 50), nullptr));
+
+  NativeSocket socket = ConnectToServer(server.GetBoundPort());
+  ASSERT_NE(socket, INVALID_NATIVE_SOCKET);
+  ASSERT_TRUE(SendAll(socket, "GET /api/v1/events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"));
+  ASSERT_NE(ReceiveUntilContains(socket, "\"sequence\":\"50\"").find("event: snapshot\n"),
+            std::string::npos);
+
+  server.PublishSnapshotAndUpdate(TestSnapshot(2, 1), TestUpdate(2, 1, true));
+  const std::string response = ReceiveUntilContains(socket, "\"session_id\":\"2\"");
+  EXPECT_NE(response.find("event: update\n"), std::string::npos) << response;
+
+  CloseSocket(socket);
+}
+
+TEST(CheevoMapV2LocalDashboardProtocol, NativeServerCountOverflowResynchronizesSseClients)
+{
+  Common::SocketContext socket_context;
+  LocalDashboardServer::Options options = TestOptions();
+  options.select_timeout_ms = 1000;
+  options.keepalive_interval_ms = 5000;
+
+  LocalDashboardServer server;
+  ASSERT_TRUE(server.Start(options, TestAssets(), TestSnapshot(1, 1), nullptr));
+
+  NativeSocket socket = ConnectToServer(server.GetBoundPort());
+  ASSERT_NE(socket, INVALID_NATIVE_SOCKET);
+  ASSERT_TRUE(SendAll(socket, "GET /api/v1/events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"));
+  ASSERT_NE(ReceiveUntilContains(socket, "\"sequence\":\"1\"").find("event: snapshot\n"),
+            std::string::npos);
+
+  for (size_t i = 0; i < CheevoMap::LocalDashboard::kMaxPendingUpdates; ++i)
+    server.PublishSnapshotAndUpdate(TestSnapshot(1, 2 + i), TestUpdate(1, 2 + i));
+  server.PublishSnapshotAndUpdate(TestSnapshot(1, 300), TestUpdate(1, 300));
+
+  std::string response = ReceiveUntilContains(socket, "\"sequence\":\"300\"");
+  EXPECT_NE(response.find("event: snapshot\n"), std::string::npos) << response;
+  EXPECT_EQ(response.find("event: update\n"), std::string::npos) << response;
+
+  server.PublishSnapshotAndUpdate(TestSnapshot(1, 301), TestUpdate(1, 301));
+  response = ReceiveUntilContains(socket, "\"sequence\":\"301\"");
+  EXPECT_NE(response.find("event: update\n"), std::string::npos) << response;
+
+  CloseSocket(socket);
+}
+
+TEST(CheevoMapV2LocalDashboardProtocol, NativeServerByteOverflowResynchronizesSseClients)
+{
+  Common::SocketContext socket_context;
+  LocalDashboardServer::Options options = TestOptions();
+  options.select_timeout_ms = 1000;
+  options.keepalive_interval_ms = 5000;
+
+  LocalDashboardServer server;
+  ASSERT_TRUE(server.Start(options, TestAssets(), TestSnapshot(1, 1), nullptr));
+
+  NativeSocket socket = ConnectToServer(server.GetBoundPort());
+  ASSERT_NE(socket, INVALID_NATIVE_SOCKET);
+  ASSERT_TRUE(SendAll(socket, "GET /api/v1/events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"));
+  ASSERT_NE(ReceiveUntilContains(socket, "\"sequence\":\"1\"").find("event: snapshot\n"),
+            std::string::npos);
+
+  server.PublishSnapshotAndUpdate(TestSnapshot(1, 2), TestUpdate(1, 2));
+  server.PublishSnapshotAndUpdate(
+      TestSnapshot(1, 3),
+      TestUpdate(1, 3, false,
+                 ",\"payload\":\"" +
+                     std::string(CheevoMap::LocalDashboard::kMaxPendingUpdateBytes, 'x') + "\""));
+
+  std::string response = ReceiveUntilContains(socket, "\"sequence\":\"3\"");
+  EXPECT_NE(response.find("event: snapshot\n"), std::string::npos) << response;
+  EXPECT_EQ(response.find("event: update\n"), std::string::npos) << response;
+
+  server.PublishSnapshotAndUpdate(TestSnapshot(1, 4), TestUpdate(1, 4));
+  response = ReceiveUntilContains(socket, "\"sequence\":\"4\"");
+  EXPECT_NE(response.find("event: update\n"), std::string::npos) << response;
 
   CloseSocket(socket);
 }

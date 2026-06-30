@@ -16,6 +16,8 @@ constexpr size_t kMaxRequestHeaderSize = 16 * 1024;
 constexpr int kMaxOpenClients = 16;
 constexpr int kMaxSseClients = 8;
 constexpr size_t kMaxSsePendingBytes = 256 * 1024;
+constexpr size_t kMaxPendingUpdates = 256;
+constexpr size_t kMaxPendingUpdateBytes = 1024 * 1024;
 
 enum class Route
 {

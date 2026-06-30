@@ -14,8 +14,10 @@ namespace
 {
 using CheevoMap::V2::SerializeStateSnapshot;
 using CheevoMap::V2::SerializeStateUpdate;
+using CheevoMap::V2::StateCursor;
 using CheevoMap::V2::StateSnapshot;
 using CheevoMap::V2::StateUpdate;
+using CheevoMap::V2::StateUpdateApplyResult;
 using CheevoMap::V2::StateValue;
 using CheevoMap::V2::StateValueMap;
 
@@ -32,36 +34,6 @@ const picojson::value& ValueForId(const picojson::value& root, const std::string
   return root.get("values").get(id);
 }
 
-class ProtocolStateMirror
-{
-public:
-  void ApplySnapshot(const StateSnapshot& snapshot)
-  {
-    session_id = snapshot.session_id;
-    sequence = snapshot.sequence;
-    values = snapshot.values;
-  }
-
-  void ApplyUpdate(const StateUpdate& update)
-  {
-    session_id = update.session_id;
-    sequence = update.sequence;
-    if (update.full)
-    {
-      values = update.values;
-      return;
-    }
-
-    for (const std::string& id : update.removed)
-      values.erase(id);
-    for (const auto& [id, value] : update.values)
-      values[id] = value;
-  }
-
-  u64 session_id = 0;
-  u64 sequence = 0;
-  StateValueMap values;
-};
 }  // namespace
 
 TEST(CheevoMapV2DashboardProtocol, SerializesEmptySnapshot)
@@ -185,24 +157,95 @@ TEST(CheevoMapV2DashboardProtocol, NonFiniteFloatingPointDoesNotWriteNanOrInfini
 
 TEST(CheevoMapV2DashboardStateMirror, AppliesSnapshotFullDeltaRemovalAndSessionChange)
 {
-  ProtocolStateMirror mirror;
+  StateSnapshot mirror{1, 1, {{"a", StateValue::Boolean(true)}}};
 
-  mirror.ApplySnapshot(StateSnapshot{1, 1, {{"a", StateValue::Boolean(true)}}});
-  ASSERT_EQ(mirror.values.size(), 1u);
-  EXPECT_TRUE(mirror.values.contains("a"));
-
-  mirror.ApplyUpdate(StateUpdate{1, 2, false, {{"b", StateValue::UnsignedInteger(4)}}, {}});
+  EXPECT_EQ(CheevoMap::V2::ApplyStateUpdateToSnapshot(
+                &mirror, StateUpdate{1, 2, false, {{"b", StateValue::UnsignedInteger(4)}}, {}}),
+            StateUpdateApplyResult::Applied);
   EXPECT_TRUE(mirror.values.contains("a"));
   EXPECT_TRUE(mirror.values.contains("b"));
 
-  mirror.ApplyUpdate(StateUpdate{1, 3, false, {{"c", StateValue::Unavailable()}}, {"a"}});
+  EXPECT_EQ(CheevoMap::V2::ApplyStateUpdateToSnapshot(
+                &mirror, StateUpdate{1, 3, false, {{"c", StateValue::Unavailable()}}, {"a"}}),
+            StateUpdateApplyResult::Applied);
   EXPECT_FALSE(mirror.values.contains("a"));
   EXPECT_TRUE(mirror.values.contains("b"));
   EXPECT_TRUE(mirror.values.contains("c"));
   EXPECT_FALSE(mirror.values.at("c").IsAvailable());
 
-  mirror.ApplyUpdate(StateUpdate{2, 1, true, {{"fresh", StateValue::String("yes")}}, {}});
+  EXPECT_EQ(CheevoMap::V2::ApplyStateUpdateToSnapshot(
+                &mirror, StateUpdate{2, 1, true, {{"fresh", StateValue::String("yes")}}, {}}),
+            StateUpdateApplyResult::Applied);
   EXPECT_EQ(mirror.session_id, 2u);
+  EXPECT_EQ(mirror.sequence, 1u);
+  EXPECT_EQ(mirror.values.size(), 1u);
+  EXPECT_TRUE(mirror.values.contains("fresh"));
+}
+
+TEST(CheevoMapV2DashboardProtocol, ComparesStateCursorsLexicographically)
+{
+  EXPECT_FALSE(CheevoMap::V2::IsCursorNewer(StateCursor{1, 1}, StateCursor{1, 1}));
+  EXPECT_TRUE(CheevoMap::V2::IsCursorNewer(StateCursor{1, 2}, StateCursor{1, 1}));
+  EXPECT_FALSE(CheevoMap::V2::IsCursorNewer(StateCursor{1, 1}, StateCursor{1, 2}));
+  EXPECT_TRUE(CheevoMap::V2::IsCursorNewer(StateCursor{2, 0}, StateCursor{1, 99}));
+  EXPECT_FALSE(CheevoMap::V2::IsCursorNewer(StateCursor{1, 99}, StateCursor{2, 0}));
+  EXPECT_FALSE(CheevoMap::V2::IsCursorNewer(
+      StateCursor{std::numeric_limits<u64>::max(), std::numeric_limits<u64>::max()},
+      StateCursor{std::numeric_limits<u64>::max(), std::numeric_limits<u64>::max()}));
+}
+
+TEST(CheevoMapV2DashboardProtocol, ComparesUnsignedDecimalStringsLikeBrowser)
+{
+  EXPECT_TRUE(CheevoMap::V2::IsUnsignedDecimalString("0"));
+  EXPECT_TRUE(CheevoMap::V2::IsUnsignedDecimalString("00042"));
+  EXPECT_FALSE(CheevoMap::V2::IsUnsignedDecimalString(""));
+  EXPECT_FALSE(CheevoMap::V2::IsUnsignedDecimalString("1.0"));
+  EXPECT_FALSE(CheevoMap::V2::IsUnsignedDecimalString("1,000"));
+  EXPECT_FALSE(CheevoMap::V2::IsUnsignedDecimalString("-1"));
+
+  EXPECT_EQ(CheevoMap::V2::CompareUnsignedDecimalStrings("000", "0"), 0);
+  EXPECT_LT(CheevoMap::V2::CompareUnsignedDecimalStrings("9", "10"), 0);
+  EXPECT_GT(CheevoMap::V2::CompareUnsignedDecimalStrings("10", "9"), 0);
+  EXPECT_LT(
+      CheevoMap::V2::CompareUnsignedDecimalStrings("18446744073709551614", "18446744073709551615"),
+      0);
+  EXPECT_GT(
+      CheevoMap::V2::CompareUnsignedDecimalStrings("18446744073709551615", "9999999999999999999"),
+      0);
+}
+
+TEST(CheevoMapV2DashboardStateMirror, RejectsStaleDuplicateAndInvalidSessionUpdates)
+{
+  StateSnapshot mirror{
+      2, 10, {{"score", StateValue::UnsignedInteger(100)}, {"keep", StateValue::String("yes")}}};
+
+  EXPECT_EQ(
+      CheevoMap::V2::ApplyStateUpdateToSnapshot(
+          &mirror, StateUpdate{2, 10, false, {{"score", StateValue::UnsignedInteger(50)}}, {}}),
+      StateUpdateApplyResult::StaleOrDuplicate);
+  EXPECT_EQ(mirror.values.at("score").AsUnsignedInteger().value(), 100u);
+
+  EXPECT_EQ(CheevoMap::V2::ApplyStateUpdateToSnapshot(
+                &mirror, StateUpdate{2, 9, false, {{"score", StateValue::UnsignedInteger(1)}}, {}}),
+            StateUpdateApplyResult::StaleOrDuplicate);
+  EXPECT_EQ(mirror.values.at("score").AsUnsignedInteger().value(), 100u);
+
+  EXPECT_EQ(CheevoMap::V2::ApplyStateUpdateToSnapshot(
+                &mirror, StateUpdate{1, 99, false, {{"old", StateValue::Boolean(true)}}, {"keep"}}),
+            StateUpdateApplyResult::StaleOrDuplicate);
+  EXPECT_TRUE(mirror.values.contains("keep"));
+
+  EXPECT_EQ(CheevoMap::V2::ApplyStateUpdateToSnapshot(
+                &mirror, StateUpdate{3, 1, false, {{"bad", StateValue::Boolean(true)}}, {"keep"}}),
+            StateUpdateApplyResult::InvalidSessionTransition);
+  EXPECT_EQ(mirror.session_id, 2u);
+  EXPECT_TRUE(mirror.values.contains("keep"));
+
+  EXPECT_EQ(
+      CheevoMap::V2::ApplyStateUpdateToSnapshot(
+          &mirror, StateUpdate{3, 1, true, {{"fresh", StateValue::Boolean(false)}}, {"keep"}}),
+      StateUpdateApplyResult::Applied);
+  EXPECT_EQ(mirror.session_id, 3u);
   EXPECT_EQ(mirror.sequence, 1u);
   EXPECT_EQ(mirror.values.size(), 1u);
   EXPECT_TRUE(mirror.values.contains("fresh"));

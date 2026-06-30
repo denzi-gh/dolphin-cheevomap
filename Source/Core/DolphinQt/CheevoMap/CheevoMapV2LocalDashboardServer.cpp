@@ -114,6 +114,27 @@ int SendFlags()
 #endif
 }
 
+bool ConfigureNoSigPipe(const NativeSocket socket)
+{
+#ifdef _WIN32
+  return true;
+#elif defined(SO_NOSIGPIPE)
+  int value = 1;
+  return setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &value, sizeof(value)) == 0;
+#else
+  return true;
+#endif
+}
+
+bool IsSelectableSocket(const NativeSocket socket)
+{
+#ifdef _WIN32
+  return true;
+#else
+  return socket >= 0 && socket < FD_SETSIZE;
+#endif
+}
+
 bool IsInvalidSocket(const NativeSocket socket)
 {
   return socket == INVALID_NATIVE_SOCKET;
@@ -127,12 +148,22 @@ struct LocalDashboardServer::Impl
     NativeSocket socket = INVALID_NATIVE_SOCKET;
     std::string request;
     std::string output;
+    CheevoMap::V2::StateCursor last_sent_cursor;
     bool request_handled = false;
     bool sse = false;
     bool close_after_write = false;
   };
 
-  bool Start(Options options_, Assets assets_, std::string snapshot_json_, std::string* error)
+  struct PublicationState
+  {
+    SerializedSnapshot snapshot;
+    std::vector<SerializedUpdate> pending_updates;
+    size_t pending_update_bytes = 0;
+    bool snapshot_resync_pending = false;
+  };
+
+  bool Start(Options options_, Assets assets_, SerializedSnapshot initial_snapshot,
+             std::string* error)
   {
     if (running.load())
       return true;
@@ -144,6 +175,15 @@ struct LocalDashboardServer::Impl
     {
       if (error)
         *error = SocketErrorString("socket");
+      socket_context.reset();
+      return false;
+    }
+
+    if (!IsSelectableSocket(new_listener))
+    {
+      if (error)
+        *error = "Listener socket exceeds select() FD_SETSIZE.";
+      CloseNativeSocket(new_listener);
       socket_context.reset();
       return false;
     }
@@ -160,14 +200,7 @@ struct LocalDashboardServer::Impl
     sockaddr_in address = {};
     address.sin_family = AF_INET;
     address.sin_port = htons(options_.port);
-    if (inet_pton(AF_INET, options_.bind_address.c_str(), &address.sin_addr) != 1)
-    {
-      if (error)
-        *error = "Invalid bind address.";
-      CloseNativeSocket(new_listener);
-      socket_context.reset();
-      return false;
-    }
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
     if (bind(new_listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0)
     {
@@ -206,12 +239,15 @@ struct LocalDashboardServer::Impl
     options = std::move(options_);
     assets = std::move(assets_);
     bound_port = ntohs(actual_address.sin_port);
+    bound_ipv4_address = actual_address.sin_addr.s_addr;
     listener = new_listener;
 
     {
       std::lock_guard lock(data_mutex);
-      snapshot_json = std::move(snapshot_json_);
-      pending_updates.clear();
+      publication.snapshot = std::move(initial_snapshot);
+      publication.pending_updates.clear();
+      publication.pending_update_bytes = 0;
+      publication.snapshot_resync_pending = false;
     }
 
     stop_requested.store(false);
@@ -231,18 +267,32 @@ struct LocalDashboardServer::Impl
 
     running.store(false);
     bound_port = 0;
+    bound_ipv4_address = 0;
     socket_context.reset();
   }
 
-  void PublishSnapshotAndUpdate(std::string snapshot_json_, std::optional<std::string> update_json)
+  void PublishSnapshotAndUpdate(SerializedSnapshot snapshot, std::optional<SerializedUpdate> update)
   {
     if (!running.load())
       return;
 
     std::lock_guard lock(data_mutex);
-    snapshot_json = std::move(snapshot_json_);
-    if (update_json)
-      pending_updates.push_back(std::move(*update_json));
+    publication.snapshot = std::move(snapshot);
+    if (!update)
+      return;
+
+    const size_t event_bytes = BuildSseEvent("update", update->json).size();
+    if (publication.pending_updates.size() + 1 > kMaxPendingUpdates ||
+        publication.pending_update_bytes + event_bytes > kMaxPendingUpdateBytes)
+    {
+      publication.pending_updates.clear();
+      publication.pending_update_bytes = 0;
+      publication.snapshot_resync_pending = true;
+      return;
+    }
+
+    publication.pending_update_bytes += event_bytes;
+    publication.pending_updates.push_back(std::move(*update));
   }
 
   void Run()
@@ -335,7 +385,14 @@ struct LocalDashboardServer::Impl
         return;
       }
 
-      if (static_cast<int>(clients.size()) >= kMaxOpenClients || !SetNonBlocking(accepted))
+      if (!IsSelectableSocket(accepted))
+      {
+        CloseNativeSocket(accepted);
+        continue;
+      }
+
+      if (static_cast<int>(clients.size()) >= kMaxOpenClients || !ConfigureNoSigPipe(accepted) ||
+          !SetNonBlocking(accepted))
       {
         CloseNativeSocket(accepted);
         continue;
@@ -477,7 +534,7 @@ struct LocalDashboardServer::Impl
                         CheevoMap::V2::SerializeDashboardHealth(), {{"Cache-Control", "no-store"}});
       break;
     case Route::Snapshot:
-      QueueHttpResponse(client, 200, "application/json; charset=utf-8", GetSnapshotJson(),
+      QueueHttpResponse(client, 200, "application/json; charset=utf-8", GetSnapshot().json,
                         {{"Cache-Control", "no-store"}});
       break;
     case Route::Events:
@@ -514,19 +571,34 @@ struct LocalDashboardServer::Impl
     client.sse = true;
     client.close_after_write = false;
     client.output = BuildSseHeaders();
-    AppendSseBytes(client, BuildSseEvent("snapshot", GetSnapshotJson()));
+    const SerializedSnapshot snapshot = GetSnapshot();
+    if (!AppendSseSnapshot(client, snapshot))
+    {
+      RemoveClient(index);
+      return;
+    }
   }
 
   void DrainPendingUpdates()
   {
-    std::vector<std::string> updates;
+    std::optional<SerializedSnapshot> snapshot_resync;
+    std::vector<SerializedUpdate> updates;
     {
       std::lock_guard lock(data_mutex);
-      updates.swap(pending_updates);
+      if (publication.snapshot_resync_pending)
+      {
+        snapshot_resync = publication.snapshot;
+        publication.snapshot_resync_pending = false;
+      }
+      updates.swap(publication.pending_updates);
+      publication.pending_update_bytes = 0;
     }
 
-    for (const std::string& update : updates)
-      BroadcastSseBytes(BuildSseEvent("update", update));
+    if (snapshot_resync)
+      BroadcastSseSnapshot(*snapshot_resync);
+
+    for (const SerializedUpdate& update : updates)
+      BroadcastSseUpdate(update);
   }
 
   void BroadcastSseBytes(const std::string& bytes)
@@ -549,6 +621,60 @@ struct LocalDashboardServer::Impl
     }
   }
 
+  void BroadcastSseSnapshot(const SerializedSnapshot& snapshot)
+  {
+    const std::string bytes = BuildSseEvent("snapshot", snapshot.json);
+    for (size_t i = 0; i < clients.size();)
+    {
+      if (!clients[i].sse)
+      {
+        ++i;
+        continue;
+      }
+
+      if (!AppendSseBytes(clients[i], bytes))
+      {
+        RemoveClient(i);
+        continue;
+      }
+
+      clients[i].last_sent_cursor = snapshot.cursor;
+      ++i;
+    }
+  }
+
+  void BroadcastSseUpdate(const SerializedUpdate& update)
+  {
+    const std::string bytes = BuildSseEvent("update", update.json);
+    for (size_t i = 0; i < clients.size();)
+    {
+      if (!clients[i].sse ||
+          !CheevoMap::V2::IsCursorNewer(update.cursor, clients[i].last_sent_cursor))
+      {
+        ++i;
+        continue;
+      }
+
+      if (!AppendSseBytes(clients[i], bytes))
+      {
+        RemoveClient(i);
+        continue;
+      }
+
+      clients[i].last_sent_cursor = update.cursor;
+      ++i;
+    }
+  }
+
+  bool AppendSseSnapshot(Client& client, const SerializedSnapshot& snapshot)
+  {
+    if (!AppendSseBytes(client, BuildSseEvent("snapshot", snapshot.json)))
+      return false;
+
+    client.last_sent_cursor = snapshot.cursor;
+    return true;
+  }
+
   bool AppendSseBytes(Client& client, const std::string& bytes)
   {
     if (client.output.size() + bytes.size() > kMaxSsePendingBytes)
@@ -558,10 +684,10 @@ struct LocalDashboardServer::Impl
     return true;
   }
 
-  std::string GetSnapshotJson() const
+  SerializedSnapshot GetSnapshot() const
   {
     std::lock_guard lock(data_mutex);
-    return snapshot_json;
+    return publication.snapshot;
   }
 
   int SseClientCount() const
@@ -597,10 +723,10 @@ struct LocalDashboardServer::Impl
   std::atomic_bool running = false;
   std::thread worker;
   std::uint16_t bound_port = 0;
+  std::uint32_t bound_ipv4_address = 0;
 
   mutable std::mutex data_mutex;
-  std::string snapshot_json;
-  std::vector<std::string> pending_updates;
+  PublicationState publication;
   std::vector<Client> clients;
 };
 
@@ -613,10 +739,10 @@ LocalDashboardServer::~LocalDashboardServer()
   Stop();
 }
 
-bool LocalDashboardServer::Start(Options options, Assets assets, std::string snapshot_json,
-                                 std::string* error)
+bool LocalDashboardServer::Start(Options options, Assets assets,
+                                 SerializedSnapshot initial_snapshot, std::string* error)
 {
-  return m_impl->Start(std::move(options), std::move(assets), std::move(snapshot_json), error);
+  return m_impl->Start(std::move(options), std::move(assets), std::move(initial_snapshot), error);
 }
 
 void LocalDashboardServer::Stop()
@@ -634,9 +760,14 @@ std::uint16_t LocalDashboardServer::GetBoundPort() const
   return m_impl->bound_port;
 }
 
-void LocalDashboardServer::PublishSnapshotAndUpdate(std::string snapshot_json,
-                                                    std::optional<std::string> update_json)
+std::uint32_t LocalDashboardServer::GetBoundIPv4AddressForTesting() const
 {
-  m_impl->PublishSnapshotAndUpdate(std::move(snapshot_json), std::move(update_json));
+  return m_impl->bound_ipv4_address;
+}
+
+void LocalDashboardServer::PublishSnapshotAndUpdate(SerializedSnapshot snapshot,
+                                                    std::optional<SerializedUpdate> update)
+{
+  m_impl->PublishSnapshotAndUpdate(std::move(snapshot), std::move(update));
 }
 }  // namespace CheevoMap::LocalDashboard
