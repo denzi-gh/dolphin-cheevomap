@@ -54,6 +54,8 @@ using CheevoMap::V2::GameIdentity;
 using CheevoMap::V2::GameInfo;
 using CheevoMap::V2::GetMutableReadDefinition;
 using CheevoMap::V2::GetReadDefinition;
+using CheevoMap::V2::IsExpressionBackedValue;
+using CheevoMap::V2::IsReadBackedValue;
 using CheevoMap::V2::MemoryArea;
 using CheevoMap::V2::MemoryReadError;
 using CheevoMap::V2::MemoryReadRequest;
@@ -315,6 +317,17 @@ void WriteU32(FakeDataSource* data_source, u64 address, u32 value, Endian endian
                                static_cast<u8>(value >> 8), static_cast<u8>(value)});
 }
 
+void WriteU16(FakeDataSource* data_source, u64 address, u16 value, Endian endian)
+{
+  if (endian == Endian::Little)
+  {
+    data_source->Write(address, {static_cast<u8>(value), static_cast<u8>(value >> 8)});
+    return;
+  }
+
+  data_source->Write(address, {static_cast<u8>(value >> 8), static_cast<u8>(value)});
+}
+
 ValueDefinition PointerValue(std::string id, ValueType type, std::vector<u64> offsets,
                              Endian pointer_endian = Endian::Big, Endian final_endian = Endian::Big,
                              u32 bytes = 0)
@@ -341,6 +354,120 @@ Package ValidPackage()
   package.values.push_back(coins);
 
   return package;
+}
+
+std::filesystem::path FindRepositoryFile(const std::filesystem::path& relative_path)
+{
+  std::vector<std::filesystem::path> starts{std::filesystem::current_path()};
+  const std::filesystem::path source_file_path(__FILE__);
+  if (source_file_path.is_absolute())
+    starts.push_back(source_file_path.parent_path());
+
+  for (const std::filesystem::path& start : starts)
+  {
+    for (std::filesystem::path directory = start; !directory.empty();
+         directory = directory.parent_path())
+    {
+      const std::filesystem::path candidate = directory / relative_path;
+      if (std::filesystem::exists(candidate))
+        return candidate;
+
+      if (directory == directory.root_path())
+        break;
+    }
+  }
+
+  ADD_FAILURE() << "Could not find repository file: " << relative_path.string();
+  return relative_path;
+}
+
+std::filesystem::path R8PP01ReferencePackagePath()
+{
+  return FindRepositoryFile("docs/examples/cheevomap-v2/R8PP01/cheevomap.json");
+}
+
+std::optional<Package> LoadR8PP01ReferencePackage(std::string* error)
+{
+  return CheevoMap::V2::LoadPackageFromFile(R8PP01ReferencePackagePath().string(), error);
+}
+
+constexpr u64 R8PP01_MEM1_BASE = 0x80000000;
+constexpr u64 R8PP01_FLIP_ROOT_READ = R8PP01_MEM1_BASE + 0x0050b544;
+constexpr u64 R8PP01_MINIGAME_ROOT_READ = R8PP01_MEM1_BASE + 0x004027f8;
+constexpr u32 R8PP01_FLIP_ROOT_POINTER = 0x80001000;
+constexpr u32 R8PP01_MINIGAME_ROOT_POINTER = 0x80002000;
+constexpr u32 R8PP01_SHARED_POINTER = 0x80003000;
+constexpr u32 R8PP01_MANSION_PATROL_POINTER = 0x80010000;
+constexpr u32 R8PP01_TILT_ISLAND_POINTER = 0x80040000;
+constexpr u32 R8PP01_FORGET_ME_NOT_POINTER = 0x80080000;
+constexpr u32 R8PP01_HAMMER_WHACKER_POINTER = 0x800c0000;
+
+void ConfigureR8PP01DataSource(FakeDataSource* data_source)
+{
+  data_source->identity = GameIdentity{"R8PP01", "", 0, 0};
+  data_source->memory_areas = {
+      MemoryArea{"mem1", "MEM1", "emulated-physical", R8PP01_MEM1_BASE, 0x04000000}};
+}
+
+void PopulateR8PP01ReferenceMemory(FakeDataSource* data_source, u32 tilt_status = 0x08000000,
+                                   u32 tilt_lives = 1, bool write_tilt_pointer = true)
+{
+  WriteU32(data_source, R8PP01_FLIP_ROOT_READ, R8PP01_FLIP_ROOT_POINTER, Endian::Big);
+  WriteU16(data_source, R8PP01_FLIP_ROOT_POINTER + 0x0a, 1, Endian::Big);
+
+  WriteU32(data_source, R8PP01_MINIGAME_ROOT_READ, R8PP01_MINIGAME_ROOT_POINTER, Endian::Big);
+  WriteU32(data_source, R8PP01_MINIGAME_ROOT_POINTER + 0x120, R8PP01_SHARED_POINTER, Endian::Big);
+  WriteU32(data_source, R8PP01_SHARED_POINTER + 0x3e4, R8PP01_MANSION_PATROL_POINTER,
+           Endian::Big);
+  if (write_tilt_pointer)
+    WriteU32(data_source, R8PP01_SHARED_POINTER + 0x3f4, R8PP01_TILT_ISLAND_POINTER, Endian::Big);
+  WriteU32(data_source, R8PP01_SHARED_POINTER + 0x404, R8PP01_FORGET_ME_NOT_POINTER, Endian::Big);
+  WriteU32(data_source, R8PP01_SHARED_POINTER + 0x408, R8PP01_HAMMER_WHACKER_POINTER,
+           Endian::Big);
+
+  WriteU32(data_source, R8PP01_MANSION_PATROL_POINTER + 0x0, 0x1f6, Endian::Big);
+  WriteU32(data_source, R8PP01_MANSION_PATROL_POINTER + 0x58, 1, Endian::Big);
+  WriteU32(data_source, R8PP01_MANSION_PATROL_POINTER + 0x1f8cc, 2, Endian::Big);
+  WriteU32(data_source, R8PP01_MANSION_PATROL_POINTER + 0x1f8ec, 12345, Endian::Big);
+
+  WriteU32(data_source, R8PP01_TILT_ISLAND_POINTER + 0x0, tilt_status, Endian::Big);
+  WriteU32(data_source, R8PP01_TILT_ISLAND_POINTER + 0xc8, tilt_lives, Endian::Big);
+  WriteU32(data_source, R8PP01_TILT_ISLAND_POINTER + 0x717c, 4, Endian::Big);
+  WriteU32(data_source, R8PP01_TILT_ISLAND_POINTER + 0x6864, 777, Endian::Big);
+
+  WriteU32(data_source, R8PP01_FORGET_ME_NOT_POINTER + 0x0, 0x1802, Endian::Big);
+  data_source->Write(R8PP01_FORGET_ME_NOT_POINTER + 0x917, {0});
+  WriteU32(data_source, R8PP01_FORGET_ME_NOT_POINTER + 0xb34, 7, Endian::Big);
+  WriteU32(data_source, R8PP01_FORGET_ME_NOT_POINTER + 0xc34, 888, Endian::Big);
+
+  WriteU32(data_source, R8PP01_HAMMER_WHACKER_POINTER + 0x30, 3, Endian::Big);
+  WriteU32(data_source, R8PP01_HAMMER_WHACKER_POINTER + 0x2f0, 999, Endian::Big);
+  WriteU32(data_source, R8PP01_HAMMER_WHACKER_POINTER + 0xd0, 1, Endian::Big);
+}
+
+void ExpectUnsignedValue(const StateValueMap& values, const std::string& id, u64 expected)
+{
+  SCOPED_TRACE(id);
+  ASSERT_TRUE(values.contains(id));
+  const std::optional<u64> actual = values.at(id).AsUnsignedInteger();
+  ASSERT_TRUE(actual);
+  EXPECT_EQ(*actual, expected);
+}
+
+void ExpectBoolValue(const StateValueMap& values, const std::string& id, bool expected)
+{
+  SCOPED_TRACE(id);
+  ASSERT_TRUE(values.contains(id));
+  const std::optional<bool> actual = values.at(id).AsBoolean();
+  ASSERT_TRUE(actual);
+  EXPECT_EQ(*actual, expected);
+}
+
+void ExpectUnavailableValue(const StateValueMap& values, const std::string& id)
+{
+  SCOPED_TRACE(id);
+  ASSERT_TRUE(values.contains(id));
+  EXPECT_FALSE(values.at(id).IsAvailable());
 }
 
 }  // namespace
@@ -2574,6 +2701,231 @@ TEST(CheevoMapV2ManagerLifecycle, CurrentGenerationCommitMutatesAndPublishes)
   hook.reset();
   CheevoMapManagerTestAccessor::ClearV2PackageAndGeneration(manager, 0);
   CheevoMapManagerTestAccessor::ResetV2State(manager, {});
+}
+
+TEST(CheevoMapV2ReferencePackage, R8PP01ExactFileParses)
+{
+  std::string error;
+  const std::optional<Package> package = LoadR8PP01ReferencePackage(&error);
+  ASSERT_TRUE(package) << error;
+
+  EXPECT_EQ(package->game.id, "R8PP01");
+  EXPECT_FALSE(package->game.revision);
+  EXPECT_EQ(package->metadata.title, "Super Paper Mario PAL - Semantic Reference Package");
+  EXPECT_DOUBLE_EQ(package->poll_hz, 20.0);
+  ASSERT_EQ(package->values.size(), 33u);
+
+  const std::vector<std::string> expected_ids{
+      "flipped_into_3d_raw",
+      "is_3d",
+      "mansion_patrol_status",
+      "mansion_patrol_lives",
+      "mansion_patrol_round_index",
+      "mansion_patrol_score",
+      "mansion_patrol_round_number",
+      "mansion_patrol_cleared",
+      "mansion_patrol_has_lives",
+      "mansion_patrol_one_life_remaining",
+      "mansion_patrol_in_danger",
+      "tilt_island_status",
+      "tilt_island_lives",
+      "tilt_island_round_index",
+      "tilt_island_score",
+      "tilt_island_round_number",
+      "tilt_island_cleared",
+      "tilt_island_has_lives",
+      "tilt_island_one_life_remaining",
+      "tilt_island_in_danger",
+      "forget_me_not_status",
+      "forget_me_not_lives",
+      "forget_me_not_round",
+      "forget_me_not_score",
+      "forget_me_not_cleared",
+      "forget_me_not_has_lives",
+      "forget_me_not_one_life_remaining",
+      "forget_me_not_in_danger",
+      "hammer_whacker_round",
+      "hammer_whacker_score",
+      "hammer_whacker_lives",
+      "hammer_whacker_has_lives",
+      "hammer_whacker_one_life_remaining",
+  };
+
+  std::set<std::string> ids;
+  size_t read_backed_count = 0;
+  size_t expression_backed_count = 0;
+  for (const ValueDefinition& value : package->values)
+  {
+    EXPECT_TRUE(ids.insert(value.id).second) << value.id;
+    EXPECT_EQ(value.id.find("pointer"), std::string::npos) << value.id;
+    if (IsReadBackedValue(value))
+      ++read_backed_count;
+    if (IsExpressionBackedValue(value))
+      ++expression_backed_count;
+  }
+
+  EXPECT_EQ(read_backed_count, 16u);
+  EXPECT_EQ(expression_backed_count, 17u);
+  EXPECT_EQ(ids.size(), expected_ids.size());
+  for (const std::string& id : expected_ids)
+    EXPECT_TRUE(ids.contains(id)) << id;
+}
+
+TEST(CheevoMapV2ReferencePackage, R8PP01EvaluatesAndUsesExpectedGroupedReads)
+{
+  std::string error;
+  const std::optional<Package> package = LoadR8PP01ReferencePackage(&error);
+  ASSERT_TRUE(package) << error;
+
+  FakeDataSource data_source;
+  ConfigureR8PP01DataSource(&data_source);
+  PopulateR8PP01ReferenceMemory(&data_source);
+
+  const auto result = EvaluatePackage(*package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  ASSERT_EQ(result->values.size(), 33u);
+
+  ExpectUnsignedValue(result->values, "flipped_into_3d_raw", 1);
+  ExpectBoolValue(result->values, "is_3d", true);
+
+  ExpectUnsignedValue(result->values, "mansion_patrol_status", 0x1f6);
+  ExpectUnsignedValue(result->values, "mansion_patrol_lives", 1);
+  ExpectUnsignedValue(result->values, "mansion_patrol_round_index", 2);
+  ExpectUnsignedValue(result->values, "mansion_patrol_score", 12345);
+  ExpectUnsignedValue(result->values, "mansion_patrol_round_number", 3);
+  ExpectBoolValue(result->values, "mansion_patrol_cleared", true);
+  ExpectBoolValue(result->values, "mansion_patrol_has_lives", true);
+  ExpectBoolValue(result->values, "mansion_patrol_one_life_remaining", true);
+  ExpectBoolValue(result->values, "mansion_patrol_in_danger", false);
+
+  ExpectUnsignedValue(result->values, "tilt_island_status", 0x08000000);
+  ExpectUnsignedValue(result->values, "tilt_island_lives", 1);
+  ExpectUnsignedValue(result->values, "tilt_island_round_index", 4);
+  ExpectUnsignedValue(result->values, "tilt_island_score", 777);
+  ExpectUnsignedValue(result->values, "tilt_island_round_number", 5);
+  ExpectBoolValue(result->values, "tilt_island_cleared", false);
+  ExpectBoolValue(result->values, "tilt_island_has_lives", true);
+  ExpectBoolValue(result->values, "tilt_island_one_life_remaining", true);
+  ExpectBoolValue(result->values, "tilt_island_in_danger", true);
+
+  ExpectUnsignedValue(result->values, "forget_me_not_status", 0x1802);
+  ExpectUnsignedValue(result->values, "forget_me_not_lives", 0);
+  ExpectUnsignedValue(result->values, "forget_me_not_round", 7);
+  ExpectUnsignedValue(result->values, "forget_me_not_score", 888);
+  ExpectBoolValue(result->values, "forget_me_not_cleared", true);
+  ExpectBoolValue(result->values, "forget_me_not_has_lives", false);
+  ExpectBoolValue(result->values, "forget_me_not_one_life_remaining", false);
+  ExpectBoolValue(result->values, "forget_me_not_in_danger", false);
+
+  ExpectUnsignedValue(result->values, "hammer_whacker_round", 3);
+  ExpectUnsignedValue(result->values, "hammer_whacker_score", 999);
+  ExpectUnsignedValue(result->values, "hammer_whacker_lives", 1);
+  ExpectBoolValue(result->values, "hammer_whacker_has_lives", true);
+  ExpectBoolValue(result->values, "hammer_whacker_one_life_remaining", true);
+
+  ASSERT_EQ(data_source.grouped_requests.size(), 4u);
+  EXPECT_EQ(data_source.grouped_requests[0].size(), 2u);
+  EXPECT_EQ(data_source.grouped_requests[1].size(), 1u);
+  EXPECT_EQ(data_source.grouped_requests[2].size(), 4u);
+  EXPECT_EQ(data_source.grouped_requests[3].size(), 16u);
+  EXPECT_EQ(data_source.grouped_read_count, 4);
+  EXPECT_EQ(data_source.single_read_count, 0);
+
+  EXPECT_EQ(data_source.grouped_requests[0][0].address, R8PP01_MINIGAME_ROOT_READ);
+  EXPECT_EQ(data_source.grouped_requests[0][1].address, R8PP01_FLIP_ROOT_READ);
+  EXPECT_EQ(data_source.grouped_requests[1][0].address, R8PP01_MINIGAME_ROOT_POINTER + 0x120);
+  EXPECT_EQ(data_source.grouped_requests[2][0].address, R8PP01_SHARED_POINTER + 0x3e4);
+  EXPECT_EQ(data_source.grouped_requests[2][1].address, R8PP01_SHARED_POINTER + 0x3f4);
+  EXPECT_EQ(data_source.grouped_requests[2][2].address, R8PP01_SHARED_POINTER + 0x404);
+  EXPECT_EQ(data_source.grouped_requests[2][3].address, R8PP01_SHARED_POINTER + 0x408);
+
+  const std::vector<u64> expected_final_addresses{
+      R8PP01_FLIP_ROOT_POINTER + 0x0a,
+      R8PP01_MANSION_PATROL_POINTER + 0x0,
+      R8PP01_MANSION_PATROL_POINTER + 0x58,
+      R8PP01_MANSION_PATROL_POINTER + 0x1f8cc,
+      R8PP01_MANSION_PATROL_POINTER + 0x1f8ec,
+      R8PP01_TILT_ISLAND_POINTER + 0x0,
+      R8PP01_TILT_ISLAND_POINTER + 0xc8,
+      R8PP01_TILT_ISLAND_POINTER + 0x6864,
+      R8PP01_TILT_ISLAND_POINTER + 0x717c,
+      R8PP01_FORGET_ME_NOT_POINTER + 0x0,
+      R8PP01_FORGET_ME_NOT_POINTER + 0x917,
+      R8PP01_FORGET_ME_NOT_POINTER + 0xb34,
+      R8PP01_FORGET_ME_NOT_POINTER + 0xc34,
+      R8PP01_HAMMER_WHACKER_POINTER + 0x30,
+      R8PP01_HAMMER_WHACKER_POINTER + 0xd0,
+      R8PP01_HAMMER_WHACKER_POINTER + 0x2f0,
+  };
+  ASSERT_EQ(data_source.grouped_requests[3].size(), expected_final_addresses.size());
+  for (size_t i = 0; i < expected_final_addresses.size(); ++i)
+    EXPECT_EQ(data_source.grouped_requests[3][i].address, expected_final_addresses[i]) << i;
+}
+
+TEST(CheevoMapV2ReferencePackage, R8PP01TiltPointerFailureIsIsolated)
+{
+  std::string error;
+  const std::optional<Package> package = LoadR8PP01ReferencePackage(&error);
+  ASSERT_TRUE(package) << error;
+
+  FakeDataSource data_source;
+  ConfigureR8PP01DataSource(&data_source);
+  PopulateR8PP01ReferenceMemory(&data_source, 0x08000000, 1, false);
+
+  const auto result = EvaluatePackage(*package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+
+  ExpectUnavailableValue(result->values, "tilt_island_status");
+  ExpectUnavailableValue(result->values, "tilt_island_lives");
+  ExpectUnavailableValue(result->values, "tilt_island_round_index");
+  ExpectUnavailableValue(result->values, "tilt_island_score");
+  ExpectUnavailableValue(result->values, "tilt_island_round_number");
+  ExpectUnavailableValue(result->values, "tilt_island_cleared");
+  ExpectUnavailableValue(result->values, "tilt_island_has_lives");
+  ExpectUnavailableValue(result->values, "tilt_island_one_life_remaining");
+  ExpectUnavailableValue(result->values, "tilt_island_in_danger");
+
+  ExpectUnsignedValue(result->values, "flipped_into_3d_raw", 1);
+  ExpectBoolValue(result->values, "is_3d", true);
+  ExpectUnsignedValue(result->values, "mansion_patrol_score", 12345);
+  ExpectBoolValue(result->values, "mansion_patrol_cleared", true);
+  ExpectUnsignedValue(result->values, "forget_me_not_score", 888);
+  ExpectBoolValue(result->values, "forget_me_not_cleared", true);
+  ExpectUnsignedValue(result->values, "hammer_whacker_score", 999);
+  ExpectBoolValue(result->values, "hammer_whacker_one_life_remaining", true);
+}
+
+TEST(CheevoMapV2ReferencePackage, R8PP01TiltZeroLivesIsNotDanger)
+{
+  std::string error;
+  const std::optional<Package> package = LoadR8PP01ReferencePackage(&error);
+  ASSERT_TRUE(package) << error;
+
+  const auto evaluate_tilt = [&](u32 status, u32 lives) {
+    FakeDataSource data_source;
+    ConfigureR8PP01DataSource(&data_source);
+    PopulateR8PP01ReferenceMemory(&data_source, status, lives);
+    return EvaluatePackage(*package, data_source, &error);
+  };
+
+  std::optional<CheevoMap::V2::EvaluationResult> result = evaluate_tilt(0x08000000, 0);
+  ASSERT_TRUE(result) << error;
+  ExpectBoolValue(result->values, "tilt_island_has_lives", false);
+  ExpectBoolValue(result->values, "tilt_island_one_life_remaining", false);
+  ExpectBoolValue(result->values, "tilt_island_in_danger", false);
+
+  result = evaluate_tilt(0x08000000, 1);
+  ASSERT_TRUE(result) << error;
+  ExpectBoolValue(result->values, "tilt_island_has_lives", true);
+  ExpectBoolValue(result->values, "tilt_island_one_life_remaining", true);
+  ExpectBoolValue(result->values, "tilt_island_in_danger", true);
+
+  result = evaluate_tilt(0x0b000002, 1);
+  ASSERT_TRUE(result) << error;
+  ExpectBoolValue(result->values, "tilt_island_has_lives", true);
+  ExpectBoolValue(result->values, "tilt_island_one_life_remaining", true);
+  ExpectBoolValue(result->values, "tilt_island_cleared", true);
+  ExpectBoolValue(result->values, "tilt_island_in_danger", false);
 }
 
 TEST(CheevoMapSchemaDispatch, DelegatesSchemaV1ToExistingParser)
