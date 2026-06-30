@@ -30,6 +30,7 @@
 namespace
 {
 using CheevoMap::Manager;
+using CheevoMap::Dolphin::ResolveDolphinPointerAddress;
 using CheevoMap::V2::BuildReadPlan;
 using CheevoMap::V2::DecodeReadResults;
 using CheevoMap::V2::DirectMemoryRead;
@@ -58,7 +59,6 @@ using CheevoMap::V2::StateValue;
 using CheevoMap::V2::ValidatePackageGameIdentity;
 using CheevoMap::V2::ValueDefinition;
 using CheevoMap::V2::ValueType;
-using CheevoMap::Dolphin::ResolveDolphinPointerAddress;
 
 class FakeDataSource final : public EmulatorDataSource
 {
@@ -66,11 +66,7 @@ public:
   EmulatorStatus GetStatus() const override { return EmulatorStatus::Running; }
   GameIdentity GetGameIdentity() const override { return identity; }
 
-  std::vector<MemoryArea> GetMemoryAreas() const override
-  {
-    return {MemoryArea{"mem1", "MEM1", "emulated-physical", 0x00000000, 0x1000},
-            MemoryArea{"mem2", "MEM2", "emulated-physical", 0x10000000, 0x1000}};
-  }
+  std::vector<MemoryArea> GetMemoryAreas() const override { return memory_areas; }
 
   bool ReadMemory(u64 address, u8* out, std::size_t size) const override
   {
@@ -149,6 +145,9 @@ public:
   mutable std::vector<std::vector<MemoryReadRequest>> grouped_requests;
   mutable std::function<void()> on_grouped_read;
   GameIdentity identity{"GAME01", "", 0, 0};
+  std::vector<MemoryArea> memory_areas{
+      MemoryArea{"mem1", "MEM1", "emulated-physical", 0x00000000, 0x1000},
+      MemoryArea{"mem2", "MEM2", "emulated-physical", 0x10000000, 0x1000}};
   std::map<u64, u8> memory;
   std::set<u64> failed_addresses;
   std::set<u64> failed_pointer_resolutions;
@@ -198,6 +197,17 @@ void SetDirectRead(ValueDefinition* value, std::string area_id, u64 address,
   value->read = DirectMemoryRead{std::move(area_id), address, endian};
 }
 
+ValueDefinition DirectValue(std::string id, ValueType type, std::string area_id, u64 address,
+                            Endian endian = Endian::None, u32 bytes = 0)
+{
+  ValueDefinition value;
+  value.id = std::move(id);
+  value.type = type;
+  value.bytes = bytes;
+  SetDirectRead(&value, std::move(area_id), address, endian);
+  return value;
+}
+
 void SetPointerChainRead(ValueDefinition* value, std::string base_area_id, u64 base_address,
                          std::string target_area_id, std::vector<u64> offsets,
                          Endian pointer_endian, Endian final_endian = Endian::None)
@@ -227,8 +237,8 @@ void WriteU32(FakeDataSource* data_source, u64 address, u32 value, Endian endian
 }
 
 ValueDefinition PointerValue(std::string id, ValueType type, std::vector<u64> offsets,
-                             Endian pointer_endian = Endian::Big,
-                             Endian final_endian = Endian::Big, u32 bytes = 0)
+                             Endian pointer_endian = Endian::Big, Endian final_endian = Endian::Big,
+                             u32 bytes = 0)
 {
   ValueDefinition value;
   value.id = std::move(id);
@@ -490,15 +500,34 @@ TEST(CheevoMapV2Parser, AcceptsMaximumStringLength)
 TEST(CheevoMapV2Parser, AcceptsPointerChainPackages)
 {
   const std::vector<std::string> values = {
-      PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+      PointerValueJson(
+          "u32", "",
+          R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
       PointerValueJson("u32", "", GoodPointerChainJson()),
-      PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x0"],"pointer_type":"u32","endian":"big")"),
-      PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"little")"),
-      PointerValueJson("u8", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")", ""),
-      PointerValueJson("u16", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
-      PointerValueJson("f32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"little")", R"(,"endian":"big")"),
-      PointerValueJson("string", R"("bytes":8,)", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")", ""),
-      PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x0","0x1","0x2","0x3","0x4","0x5","0x6","0x7","0x8","0x9","0xa","0xb","0xc","0xd","0xe","0xf"],"pointer_type":"u32","endian":"big")"),
+      PointerValueJson(
+          "u32", "",
+          R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x0"],"pointer_type":"u32","endian":"big")"),
+      PointerValueJson(
+          "u32", "",
+          R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"little")"),
+      PointerValueJson(
+          "u8", "",
+          R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")",
+          ""),
+      PointerValueJson(
+          "u16", "",
+          R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+      PointerValueJson(
+          "f32", "",
+          R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"little")",
+          R"(,"endian":"big")"),
+      PointerValueJson(
+          "string", R"("bytes":8,)",
+          R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")",
+          ""),
+      PointerValueJson(
+          "u32", "",
+          R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x0","0x1","0x2","0x3","0x4","0x5","0x6","0x7","0x8","0x9","0xa","0xb","0xc","0xd","0xe","0xf"],"pointer_type":"u32","endian":"big")"),
   };
 
   for (const std::string& value : values)
@@ -509,9 +538,10 @@ TEST(CheevoMapV2Parser, AcceptsPointerChainPackages)
   }
 
   std::string error;
-  const auto mixed = ParseText(PackageJson(R"({"id":"direct","type":"u8","read":{"area":"mem1","address":"0x0"}},)" +
-                                     PointerValueJson("u32", "")),
-                               &error);
+  const auto mixed = ParseText(
+      PackageJson(R"({"id":"direct","type":"u8","read":{"area":"mem1","address":"0x0"}},)" +
+                  PointerValueJson("u32", "")),
+      &error);
   ASSERT_TRUE(mixed) << error;
   ASSERT_EQ(mixed->values.size(), 2u);
 }
@@ -519,7 +549,8 @@ TEST(CheevoMapV2Parser, AcceptsPointerChainPackages)
 TEST(CheevoMapV2Parser, RejectsInvalidPointerChainPackages)
 {
   const std::vector<std::pair<std::string, std::string>> cases = {
-      {std::string(R"({"id":"p","type":"u32","read":{"area":"mem1","address":"0x0","pointer_chain":{)") +
+      {std::string(
+           R"({"id":"p","type":"u32","read":{"area":"mem1","address":"0x0","pointer_chain":{)") +
            GoodPointerChainJson() + R"(},"endian":"big"}})",
        "must not mix"},
       {std::string(R"({"id":"p","type":"u32","read":{"area":"mem1","pointer_chain":{)") +
@@ -531,71 +562,140 @@ TEST(CheevoMapV2Parser, RejectsInvalidPointerChainPackages)
       {R"({"id":"p","type":"u32","read":{"endian":"big"}})", "either direct"},
       {PointerValueJson("u32", "", GoodPointerChainJson(), R"(,"endian":"big","extra":true)"),
        "unknown field"},
-      {PointerValueJson("u32", "", R"("target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
        "base"},
-      {PointerValueJson("u32", "", R"("base":1,"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":1,"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
        "base must be an object"},
-      {PointerValueJson("u32", "", R"("base":{"address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
        "base.area"},
-      {PointerValueJson("u32", "", R"("base":{"area":"","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
        "base.area"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
        "base.address"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
        "base.address"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":1},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":1},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
        "base.address"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860","extra":true},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860","extra":true},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
        "unknown field"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
        "target_area"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"","offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
        "target_area"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":1,"offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":1,"offsets":["0x10"],"pointer_type":"u32","endian":"big")"),
        "target_area must be a string"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","pointer_type":"u32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","pointer_type":"u32","endian":"big")"),
        "offsets"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":1,"pointer_type":"u32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":1,"pointer_type":"u32","endian":"big")"),
        "offsets must be an array"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":[],"pointer_type":"u32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":[],"pointer_type":"u32","endian":"big")"),
        "at least 1"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x0","0x1","0x2","0x3","0x4","0x5","0x6","0x7","0x8","0x9","0xa","0xb","0xc","0xd","0xe","0xf","0x10"],"pointer_type":"u32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x0","0x1","0x2","0x3","0x4","0x5","0x6","0x7","0x8","0x9","0xa","0xb","0xc","0xd","0xe","0xf","0x10"],"pointer_type":"u32","endian":"big")"),
        "at most 16"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":[1],"pointer_type":"u32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":[1],"pointer_type":"u32","endian":"big")"),
        "offsets[0]"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":[-1],"pointer_type":"u32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":[-1],"pointer_type":"u32","endian":"big")"),
        "offsets[0]"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["16"],"pointer_type":"u32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["16"],"pointer_type":"u32","endian":"big")"),
        "offsets[0]"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["10"],"pointer_type":"u32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["10"],"pointer_type":"u32","endian":"big")"),
        "offsets[0]"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0xzz"],"pointer_type":"u32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0xzz"],"pointer_type":"u32","endian":"big")"),
        "offsets[0]"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10000000000000000"],"pointer_type":"u32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10000000000000000"],"pointer_type":"u32","endian":"big")"),
        "offsets[0]"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"endian":"big")"),
        "pointer_type"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u64","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u64","endian":"big")"),
        "pointer_type"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"s32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"s32","endian":"big")"),
        "pointer_type"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"f32","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"f32","endian":"big")"),
        "pointer_type"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"banana","endian":"big")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"banana","endian":"big")"),
        "pointer_type"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32")"),
        "pointer_chain.endian"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"native")"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"native")"),
        "pointer_chain.endian"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":1)"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":1)"),
        "pointer_chain.endian must be a string"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big","extra":true)"),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big","extra":true)"),
        "unknown field"},
-      {PointerValueJson("u16", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")", ""),
+      {PointerValueJson(
+           "u16", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")",
+           ""),
        "read.endian"},
-      {PointerValueJson("u32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")", ""),
+      {PointerValueJson(
+           "u32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")",
+           ""),
        "read.endian"},
-      {PointerValueJson("f32", "", R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")", ""),
+      {PointerValueJson(
+           "f32", "",
+           R"("base":{"area":"mem2","address":"0x860"},"target_area":"mem2","offsets":["0x10"],"pointer_type":"u32","endian":"big")",
+           ""),
        "read.endian"},
       {PointerValueJson("u8", "", GoodPointerChainJson(), R"(,"endian":"big")"), "not valid"},
       {PointerValueJson("string", R"("bytes":4,)", GoodPointerChainJson(), R"(,"endian":"big")"),
@@ -950,6 +1050,174 @@ TEST(CheevoMapV2PointerRuntime, DirectAndPointerValuesShareInitialStage)
   EXPECT_EQ(data_source.grouped_requests[0][1].address, 0x100u);
 }
 
+TEST(CheevoMapV2PointerRuntime, ReusesInitialDirectReadForExactPointerFinalRequest)
+{
+  Package package;
+  package.game.id = "GAME01";
+  package.metadata.title = "Test";
+  package.values.push_back(DirectValue("direct", ValueType::U32, "mem1", 0x210, Endian::Big));
+  package.values.push_back(PointerValue("pointer", ValueType::U32, {0x10}));
+
+  FakeDataSource data_source;
+  WriteU32(&data_source, 0x100, 0x200, Endian::Big);
+  data_source.Write(0x210, {0x12, 0x34, 0x56, 0x78});
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_EQ(*result->values.at("direct").AsUnsignedInteger(), 0x12345678u);
+  EXPECT_EQ(*result->values.at("pointer").AsUnsignedInteger(), 0x12345678u);
+  ASSERT_EQ(data_source.grouped_requests.size(), 1u);
+  ASSERT_EQ(data_source.grouped_requests[0].size(), 2u);
+  EXPECT_EQ(data_source.grouped_requests[0][0].address, 0x100u);
+  EXPECT_EQ(data_source.grouped_requests[0][1].address, 0x210u);
+}
+
+TEST(CheevoMapV2PointerRuntime, ReusesInitialBytesWithDifferentFinalDecodeType)
+{
+  Package package;
+  package.game.id = "GAME01";
+  package.metadata.title = "Test";
+  package.values.push_back(DirectValue("direct", ValueType::U32, "mem1", 0x210, Endian::Big));
+  package.values.push_back(PointerValue("pointer", ValueType::F32, {0x10}));
+
+  FakeDataSource data_source;
+  WriteU32(&data_source, 0x100, 0x200, Endian::Big);
+  data_source.Write(0x210, {0x3f, 0x80, 0x00, 0x00});
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_EQ(*result->values.at("direct").AsUnsignedInteger(), 0x3f800000u);
+  EXPECT_DOUBLE_EQ(*result->values.at("pointer").AsFloatingPoint(), 1.0);
+  EXPECT_EQ(data_source.grouped_read_count, 1);
+}
+
+TEST(CheevoMapV2PointerRuntime, DoesNotReuseInitialReadWhenSizeDiffers)
+{
+  Package package;
+  package.game.id = "GAME01";
+  package.metadata.title = "Test";
+  package.values.push_back(DirectValue("direct", ValueType::U16, "mem1", 0x210, Endian::Big));
+  package.values.push_back(PointerValue("pointer", ValueType::U32, {0x10}));
+
+  FakeDataSource data_source;
+  WriteU32(&data_source, 0x100, 0x200, Endian::Big);
+  data_source.Write(0x210, {0x12, 0x34, 0x56, 0x78});
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_EQ(*result->values.at("direct").AsUnsignedInteger(), 0x1234u);
+  EXPECT_EQ(*result->values.at("pointer").AsUnsignedInteger(), 0x12345678u);
+  ASSERT_EQ(data_source.grouped_requests.size(), 2u);
+  ASSERT_EQ(data_source.grouped_requests[1].size(), 1u);
+  EXPECT_EQ(data_source.grouped_requests[1][0].address, 0x210u);
+  EXPECT_EQ(data_source.grouped_requests[1][0].size, 4u);
+}
+
+TEST(CheevoMapV2PointerRuntime, DoesNotReuseInitialReadWhenAreaDiffers)
+{
+  Package package;
+  package.game.id = "GAME01";
+  package.metadata.title = "Test";
+  package.values.push_back(DirectValue("direct", ValueType::U32, "mem1", 0x210, Endian::Big));
+
+  ValueDefinition pointer;
+  pointer.id = "pointer";
+  pointer.type = ValueType::U32;
+  SetPointerChainRead(&pointer, "mem1", 0x100, "mem2", {0x10}, Endian::Big, Endian::Big);
+  package.values.push_back(pointer);
+
+  FakeDataSource data_source;
+  data_source.memory_areas = {MemoryArea{"mem1", "MEM1", "emulated-physical", 0x00000000, 0x1000},
+                              MemoryArea{"mem2", "MEM2", "emulated-physical", 0x00000000, 0x1000}};
+  WriteU32(&data_source, 0x100, 0x200, Endian::Big);
+  data_source.Write(0x210, {0x12, 0x34, 0x56, 0x78});
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_EQ(*result->values.at("direct").AsUnsignedInteger(), 0x12345678u);
+  EXPECT_EQ(*result->values.at("pointer").AsUnsignedInteger(), 0x12345678u);
+  ASSERT_EQ(data_source.grouped_requests.size(), 2u);
+  ASSERT_EQ(data_source.grouped_requests[1].size(), 1u);
+  EXPECT_EQ(data_source.grouped_requests[1][0].memory_area_id, "mem2");
+  EXPECT_EQ(data_source.grouped_requests[1][0].address, 0x210u);
+}
+
+TEST(CheevoMapV2PointerRuntime, ReusesFailedInitialReadAsUnavailableWithoutReread)
+{
+  Package package;
+  package.game.id = "GAME01";
+  package.metadata.title = "Test";
+  package.values.push_back(DirectValue("direct", ValueType::U32, "mem1", 0x210, Endian::Big));
+  package.values.push_back(PointerValue("pointer", ValueType::U32, {0x10}));
+
+  FakeDataSource data_source;
+  WriteU32(&data_source, 0x100, 0x200, Endian::Big);
+  data_source.Write(0x210, {0x12, 0x34, 0x56, 0x78});
+  data_source.failed_addresses.insert(0x210);
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_FALSE(result->values.at("direct").IsAvailable());
+  EXPECT_FALSE(result->values.at("pointer").IsAvailable());
+  EXPECT_EQ(data_source.grouped_read_count, 1);
+}
+
+TEST(CheevoMapV2PointerRuntime, HandlesMixedCachedAndUncachedFinalRequests)
+{
+  Package package;
+  package.game.id = "GAME01";
+  package.metadata.title = "Test";
+  package.values.push_back(DirectValue("direct", ValueType::U32, "mem1", 0x210, Endian::Big));
+  package.values.push_back(PointerValue("cached", ValueType::U32, {0x10}));
+
+  ValueDefinition uncached = PointerValue("uncached", ValueType::U32, {0x20});
+  SetPointerChainRead(&uncached, "mem1", 0x104, "mem1", {0x20}, Endian::Big, Endian::Big);
+  package.values.push_back(uncached);
+
+  FakeDataSource data_source;
+  WriteU32(&data_source, 0x100, 0x200, Endian::Big);
+  WriteU32(&data_source, 0x104, 0x300, Endian::Big);
+  data_source.Write(0x210, {0x00, 0x00, 0x00, 0x11});
+  data_source.Write(0x320, {0x00, 0x00, 0x00, 0x22});
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_EQ(*result->values.at("direct").AsUnsignedInteger(), 0x11u);
+  EXPECT_EQ(*result->values.at("cached").AsUnsignedInteger(), 0x11u);
+  EXPECT_EQ(*result->values.at("uncached").AsUnsignedInteger(), 0x22u);
+  ASSERT_EQ(data_source.grouped_requests.size(), 2u);
+  ASSERT_EQ(data_source.grouped_requests[1].size(), 1u);
+  EXPECT_EQ(data_source.grouped_requests[1][0].address, 0x320u);
+}
+
+TEST(CheevoMapV2PointerRuntime, MultiplePointerValuesReuseOneInitialResult)
+{
+  Package package;
+  package.game.id = "GAME01";
+  package.metadata.title = "Test";
+  package.values.push_back(DirectValue("direct", ValueType::U32, "mem1", 0x210, Endian::Big));
+  package.values.push_back(PointerValue("as_u32", ValueType::U32, {0x10}));
+  package.values.push_back(PointerValue("as_f32", ValueType::F32, {0x10}));
+
+  FakeDataSource data_source;
+  WriteU32(&data_source, 0x100, 0x200, Endian::Big);
+  data_source.Write(0x210, {0x3f, 0x80, 0x00, 0x00});
+
+  std::string error;
+  const auto result = EvaluatePackage(package, data_source, &error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_EQ(*result->values.at("direct").AsUnsignedInteger(), 0x3f800000u);
+  EXPECT_EQ(*result->values.at("as_u32").AsUnsignedInteger(), 0x3f800000u);
+  EXPECT_DOUBLE_EQ(*result->values.at("as_f32").AsFloatingPoint(), 1.0);
+  EXPECT_EQ(data_source.grouped_read_count, 1);
+}
+
 TEST(CheevoMapV2PointerRuntime, DeduplicatesRootIntermediateAndFinalRequests)
 {
   Package package;
@@ -979,13 +1247,14 @@ TEST(CheevoMapV2PointerRuntime, ChainsOfDifferentDepthsRemainBatchedByStage)
   Package package;
   package.game.id = "GAME01";
   package.metadata.title = "Test";
-  package.values.push_back(PointerValue("short", ValueType::U8, {0x1}, Endian::Big, Endian::None));
-  package.values.push_back(PointerValue("long", ValueType::U8, {0x0, 0x2}, Endian::Big, Endian::None));
+  package.values.push_back(PointerValue("short", ValueType::U8, {0x4}, Endian::Big, Endian::None));
+  package.values.push_back(
+      PointerValue("long", ValueType::U8, {0x0, 0x2}, Endian::Big, Endian::None));
 
   FakeDataSource data_source;
   WriteU32(&data_source, 0x100, 0x200, Endian::Big);
   WriteU32(&data_source, 0x200, 0x300, Endian::Big);
-  data_source.Write(0x201, {0x11});
+  data_source.Write(0x204, {0x11});
   data_source.Write(0x302, {0x22});
 
   std::string error;
@@ -996,7 +1265,7 @@ TEST(CheevoMapV2PointerRuntime, ChainsOfDifferentDepthsRemainBatchedByStage)
   ASSERT_EQ(data_source.grouped_requests.size(), 3u);
   EXPECT_EQ(data_source.grouped_requests[1].front().address, 0x200u);
   ASSERT_EQ(data_source.grouped_requests[2].size(), 2u);
-  EXPECT_EQ(data_source.grouped_requests[2][0].address, 0x201u);
+  EXPECT_EQ(data_source.grouped_requests[2][0].address, 0x204u);
   EXPECT_EQ(data_source.grouped_requests[2][1].address, 0x302u);
 }
 
@@ -1065,7 +1334,8 @@ TEST(CheevoMapV2PointerRuntime, IntermediateFailuresOnlyMakeAffectedChainUnavail
   Package package;
   package.game.id = "GAME01";
   package.metadata.title = "Test";
-  package.values.push_back(PointerValue("bad", ValueType::U8, {0x0, 0x1}, Endian::Big, Endian::None));
+  package.values.push_back(
+      PointerValue("bad", ValueType::U8, {0x0, 0x1}, Endian::Big, Endian::None));
   ValueDefinition good = PointerValue("good", ValueType::U8, {0x2}, Endian::Big, Endian::None);
   SetPointerChainRead(&good, "mem1", 0x104, "mem1", {0x2}, Endian::Big, Endian::None);
   package.values.push_back(good);
@@ -1088,9 +1358,8 @@ TEST(CheevoMapV2PointerRuntime, OverflowAndBoundaryFailuresBecomeUnavailable)
   Package package;
   package.game.id = "GAME01";
   package.metadata.title = "Test";
-  package.values.push_back(PointerValue("overflow", ValueType::U8,
-                                        {std::numeric_limits<u64>::max()}, Endian::Big,
-                                        Endian::None));
+  package.values.push_back(PointerValue(
+      "overflow", ValueType::U8, {std::numeric_limits<u64>::max()}, Endian::Big, Endian::None));
   ValueDefinition boundary = PointerValue("boundary", ValueType::U16, {0xfff});
   SetPointerChainRead(&boundary, "mem1", 0x104, "mem1", {0xfff}, Endian::Big, Endian::Big);
   package.values.push_back(boundary);

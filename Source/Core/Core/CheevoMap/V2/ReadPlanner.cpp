@@ -82,6 +82,17 @@ RequestBatch MakeRequestBatch(const std::vector<ReadKey>& keys)
   return batch;
 }
 
+std::map<ReadKey, size_t> MakeRequestIndex(const std::vector<MemoryReadRequest>& requests)
+{
+  std::map<ReadKey, size_t> request_indices;
+  for (size_t i = 0; i < requests.size(); ++i)
+  {
+    const MemoryReadRequest& request = requests[i];
+    request_indices.emplace(ReadKey{request.memory_area_id, request.address, request.size}, i);
+  }
+  return request_indices;
+}
+
 bool AddUnsignedOffset(u64 address, u64 offset, u64* out)
 {
   if (address > std::numeric_limits<u64>::max() - offset)
@@ -216,8 +227,8 @@ std::optional<ReadPlan> BuildReadPlan(const Package& package,
       const auto area_it = areas.find(direct->area_id);
       if (area_it == areas.end())
       {
-        *error_out = fmt::format("value \"{}\" uses unknown memory area \"{}\"", value.id,
-                                 direct->area_id);
+        *error_out =
+            fmt::format("value \"{}\" uses unknown memory area \"{}\"", value.id, direct->area_id);
         return std::nullopt;
       }
 
@@ -250,24 +261,24 @@ std::optional<ReadPlan> BuildReadPlan(const Package& package,
 
     if (chain->offsets.empty() || chain->offsets.size() > 16)
     {
-      *error_out = fmt::format("value \"{}\" pointer_chain.offsets must contain 1..16 offsets",
-                               value.id);
+      *error_out =
+          fmt::format("value \"{}\" pointer_chain.offsets must contain 1..16 offsets", value.id);
       return std::nullopt;
     }
 
     const u32 pointer_size = GetPointerReadSize(chain->pointer_type);
     if (pointer_size == 0 || chain->pointer_endian == Endian::None)
     {
-      *error_out = fmt::format("value \"{}\" has invalid pointer_chain pointer type or endian",
-                               value.id);
+      *error_out =
+          fmt::format("value \"{}\" has invalid pointer_chain pointer type or endian", value.id);
       return std::nullopt;
     }
 
     const auto base_area_it = areas.find(chain->base.area_id);
     if (base_area_it == areas.end())
     {
-      *error_out = fmt::format("value \"{}\" uses unknown pointer_chain.base area \"{}\"",
-                               value.id, chain->base.area_id);
+      *error_out = fmt::format("value \"{}\" uses unknown pointer_chain.base area \"{}\"", value.id,
+                               chain->base.area_id);
       return std::nullopt;
     }
 
@@ -319,7 +330,8 @@ std::optional<ReadPlan> BuildReadPlan(const Package& package,
   {
     const auto& value = *pending.value;
     const auto& direct = std::get<DirectMemoryRead>(value.read);
-    plan.values.push_back(PlannedValueRead{value.id, initial_batch.request_indices[pending.key_index],
+    plan.values.push_back(PlannedValueRead{value.id,
+                                           initial_batch.request_indices[pending.key_index],
                                            value.type, direct.endian, GetValueReadSize(value)});
   }
 
@@ -349,6 +361,7 @@ std::optional<ReadPlan> BuildReadPlan(const Package& package,
 StateValueMap EvaluateReadPlan(const ReadPlan& plan, const EmulatorDataSource& data_source)
 {
   const std::vector<MemoryReadResult> initial_results = data_source.ReadMemory(plan.requests);
+  const std::map<ReadKey, size_t> initial_request_indices = MakeRequestIndex(plan.requests);
   StateValueMap values = DecodeReadResults(plan, initial_results);
 
   if (plan.pointer_chains.empty())
@@ -448,6 +461,7 @@ StateValueMap EvaluateReadPlan(const ReadPlan& plan, const EmulatorDataSource& d
     }
   }
 
+  std::vector<bool> emitted(chains.size(), false);
   std::vector<ReadKey> final_keys;
   std::vector<size_t> final_chain_indices;
   for (size_t i = 0; i < chains.size(); ++i)
@@ -466,11 +480,32 @@ StateValueMap EvaluateReadPlan(const ReadPlan& plan, const EmulatorDataSource& d
       continue;
     }
 
-    final_keys.push_back(ReadKey{planned.target_area_id, final_address, planned.size});
+    const ReadKey final_key{planned.target_area_id, final_address, planned.size};
+    if (const auto initial_it = initial_request_indices.find(final_key);
+        initial_it != initial_request_indices.end())
+    {
+      const MemoryReadResult* result = initial_it->second < initial_results.size() ?
+                                           &initial_results[initial_it->second] :
+                                           nullptr;
+      if (result == nullptr)
+      {
+        values.emplace(planned.value_id, StateValue::Unavailable());
+      }
+      else
+      {
+        values.emplace(planned.value_id,
+                       DecodeValue(PlannedValueRead{planned.value_id, initial_it->second,
+                                                    planned.type, planned.endian, planned.size},
+                                   *result));
+      }
+      emitted[i] = true;
+      continue;
+    }
+
+    final_keys.push_back(final_key);
     final_chain_indices.push_back(i);
   }
 
-  std::vector<bool> emitted(chains.size(), false);
   if (!final_keys.empty())
   {
     const RequestBatch batch = MakeRequestBatch(final_keys);
